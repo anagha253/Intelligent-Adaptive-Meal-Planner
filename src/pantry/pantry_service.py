@@ -11,7 +11,6 @@ sys.path.append(
 )
 
 import scripts.mapping_retrieval_query
-from src.grocery.grocery_service import GroceryService
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -201,57 +200,6 @@ def filter_ingredient_list(pantry_data, ingredient_names):
 
     return grocery_list
 
-def search_grocery_list(grocery_list):
-    """
-    Search Tavily for products corresponding to the
-    ingredients that still need to be purchased.
-    """
-
-    grocery_service = GroceryService()
-
-    results = []
-
-    for ingredient, item in grocery_list.items():
-
-        quantity = item["quantity"]
-        unit = item["unit"]
-
-        # Tavily grocery search
-        option = grocery_service.get_grocery_option(
-                ingredient,
-                quantity,
-                unit,
-                item["ingredient_id"]
-        )
-
-        if option:
-            results.append({
-                "ingredient": ingredient,
-                "quantity": quantity,
-                "unit": unit,
-                "product_name": option.product_name,
-                "package_quantity": option.package_quantity,
-                "package_unit": option.package_unit,
-                "packages_needed": option.packages_needed,
-                "price_per_package": option.price_per_package,
-                "total_cost": option.total_cost,
-                "store": option.store,
-                "source_url": option.source_url
-            })
-
-        else:
-            results.append({
-                "ingredient": ingredient,
-                "quantity": quantity,
-                "unit": unit,
-                "product_name": None,
-                "price_per_package": None,
-                "store": None,
-                "source_url": None
-            })
-
-    return results
-
 
 if __name__ == "__main__":
 
@@ -275,16 +223,3 @@ if __name__ == "__main__":
 
     print("\nFinal Grocery List:")
     print(grocery_list)
-
-    # -----------------------------------------
-    # Search Tavily for grocery products
-    # -----------------------------------------
-
-    grocery_results = search_grocery_list(grocery_list)
-
-    print("\nTavily Grocery Results:")
-    print(json.dumps(
-        grocery_results,
-        indent=2,
-        ensure_ascii=False
-    ))

@@ -1,16 +1,23 @@
-"""src/grocery/tavily_client.py — find Singapore grocery prices with Tavily web search.
+"""src/grocery/tavily_client.py
 
-For each ingredient it searches "price of <ingredient> in Singapore", restricted to Singapore
-supermarket websites, and turns each search result (a web page) into a product dict:
-title, price (SGD), package size text, store, url.
+Find Singapore grocery prices from FairPrice using Tavily web search.
 
-    client = TavilyGroceryClient()        # reads TAVILY_API_KEY from .env / environment
-    products = client.search("fresh milk")
+For each ingredient, Tavily searches FairPrice and converts usable
+FairPrice product pages into normalized product dictionaries containing:
 
-Results are web pages, not a product database, so price and size are EXTRACTED from the page
-text. Pages where no price can be found are dropped (never guessed).
+    title
+    price
+    currency
+    package-size text
+    store
+    URL
+    stock status
+
+Only individual FairPrice product pages are accepted. Search pages,
+category pages, promotion pages, and pages without a reliable price
+are rejected.
 """
-import json
+
 import hashlib
 import os
 import re
@@ -19,72 +26,197 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
+
+# ---------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-# Singapore supermarket websites -> store name shown to users
-SG_GROCERY_DOMAINS = {
-    "fairprice.com.sg": "FairPrice",
-    # "coldstorage.com.sg": "Cold Storage",
-    # "shengsiong.com.sg": "Sheng Siong",
-    # "giant.sg": "Giant",
-    # "redmart.lazada.sg": "RedMart",
-}
 
-# Product pages vs. search/category/promo pages
-_PRODUCT_URL = re.compile(r"/(product|products|p)/|-i\d+(-s\d+)?\.html|[-/]\d{5,}/?$", re.IGNORECASE)
-_OUT_OF_STOCK = re.compile(r"out of stock|sold out|currently unavailable|not available", re.IGNORECASE)
+# ---------------------------------------------------------------------
+# Grocery source
+# ---------------------------------------------------------------------
+
+GROCERY_DOMAIN = "fairprice.com.sg"
+GROCERY_STORE = "FairPrice"
+
+
+# ---------------------------------------------------------------------
+# FairPrice page detection
+# ---------------------------------------------------------------------
+
+# Individual product pages.
+_PRODUCT_URL = re.compile(
+    r"/(product|products|p)/"
+    r"|-i\d+(-s\d+)?\.html"
+    r"|[-/]\d{5,}/?$",
+    re.IGNORECASE,
+)
+
+# Pages that may contain many products/prices and therefore must not
+# be treated as one grocery product.
 _NON_PRODUCT_URL = re.compile(
-    r"/(search|category|categories|promotions?|collections?|brands?|recipes?|blog|deals|offers?)(/|$)"
-    r"|[?&](q|query|keyword|search)=", re.IGNORECASE)
+    r"/(search|category|categories|promotions?|collections?|brands?|"
+    r"recipes?|blog|deals|offers?|product-listing|tag)(/|$|\?)"
+    r"|[?&](q|query|keyword|search|category|pageType|tag)=",
+    re.IGNORECASE,
+)
 
-# "$3.45", "S$ 3.45", "SGD 3.45"
-_PRICE = re.compile(r"(?:S\$|SGD\s?|\$)\s?(\d{1,4}(?:,\d{3})*(?:\.\d{1,2})?)")
-# Prices next to these words are banners/fees, not the product price
-# (whole words only - "Offer" in "campaign labelOffer" must NOT count as "off")
-_IGNORE_BEFORE = re.compile(r"\b(deliver\w*|above|min|minimum|spend|save|voucher|cashback|over|free|"
-                            r"shipping|fee|off|worth|up to|earn|reward)\b[^$]{0,25}$", re.IGNORECASE)
-# Title suffixes like " | FairPrice Singapore", " - Cold Storage"
-_TITLE_SUFFIX = re.compile(r"\s+[|\-–—]\s+.*(fairprice|cold storage|sheng siong|giant|redmart|lazada|"
-                           r"singapore|online|shop).*$", re.IGNORECASE)
+_OUT_OF_STOCK = re.compile(
+    r"out of stock|sold out|currently unavailable|not available",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------
+# Price extraction
+# ---------------------------------------------------------------------
+
+# Matches:
+# $3.45
+# S$3.45
+# S$ 3.45
+# SGD 3.45
+_PRICE = re.compile(
+    r"(?:S\$|SGD\s?|\$)\s?"
+    r"(\d{1,4}(?:,\d{3})*(?:\.\d{1,2})?)"
+)
+
+# Prices immediately following these phrases are usually promotional
+# thresholds, fees or rewards rather than the product price.
+#
+# Example:
+# "Free delivery above $79"
+_IGNORE_BEFORE = re.compile(
+    r"\b("
+    r"deliver\w*|above|min|minimum|spend|save|voucher|cashback|"
+    r"over|free|shipping|fee|off|worth|up to|earn|reward"
+    r")\b[^$]{0,25}$",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------
+# FairPrice title cleanup
+# ---------------------------------------------------------------------
+
+_TITLE_SUFFIX = re.compile(
+    r"\s+[|\-–—]\s+.*"
+    r"(fairprice|ntuc fairprice|singapore|online|shop).*$",
+    re.IGNORECASE,
+)
 
 
 class SearchError(Exception):
-    """The price source failed (bad key, quota, network...) - NOT the same as 'no products'."""
+    """Raised when Tavily itself fails rather than simply finding no products."""
 
 
 def store_for(url: str) -> tuple[str | None, str | None]:
-    """'https://www.fairprice.com.sg/product/x' -> ('fairprice.com.sg', 'FairPrice')."""
+    """
+    Return FairPrice information when a URL belongs to FairPrice.
+
+    Subdomains such as omni.fairprice.com.sg are also recognised.
+    """
+
     host = urlparse(url or "").netloc.lower().removeprefix("www.")
-    for domain, name in SG_GROCERY_DOMAINS.items():
-        if host == domain or host.endswith("." + domain):
-            return domain, name
+
+    if host == GROCERY_DOMAIN or host.endswith("." + GROCERY_DOMAIN):
+        return GROCERY_DOMAIN, GROCERY_STORE
+
     return None, None
 
 
 def is_product_page(url: str) -> bool:
-    path = urlparse(url or "").path + ("?" + urlparse(url or "").query if urlparse(url or "").query else "")
-    return bool(_PRODUCT_URL.search(path)) and not _NON_PRODUCT_URL.search(path)
+    """
+    Return True only when the URL looks like an individual product page.
+
+    Category, search, tag and promotional pages are rejected because
+    they may contain multiple products and multiple unrelated prices.
+    """
+
+    parsed = urlparse(url or "")
+
+    path_and_query = parsed.path
+
+    if parsed.query:
+        path_and_query += "?" + parsed.query
+
+    if _NON_PRODUCT_URL.search(path_and_query):
+        return False
+
+    return bool(_PRODUCT_URL.search(path_and_query))
 
 
 def clean_title(title: str) -> str:
-    title = re.sub(r"^\s*buy\s+", "", str(title or ""), flags=re.IGNORECASE)
+    """
+    Remove FairPrice page decorations from a product title.
+
+    Example:
+        "Buy Meiji Fresh Milk 2L | FairPrice Singapore"
+        -> "Meiji Fresh Milk 2L"
+    """
+
+    title = str(title or "")
+
+    title = re.sub(
+        r"^\s*buy\s+",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+
     return _TITLE_SUFFIX.sub("", title).strip()
 
 
 def extract_price(text: str) -> float | None:
+    """
+    Extract the first reliable product price from FairPrice text.
+
+    Promotional thresholds such as:
+        "Free delivery above $79"
+
+    and unit prices such as:
+        "$0.35/100g"
+
+    are ignored.
+
+    FairPrice offer pages commonly show:
+        $16.50
+        $18.20
+        Save $1.70
+
+    where the first price is the current offer price and the second is
+    the previous price. Therefore page order is preserved.
+    """
+
     text = str(text or "")
 
     matches = list(_PRICE.finditer(text))
     prices = []
 
-    for m in matches:
-        after = text[m.end():m.end() + 30]
+    for match in matches:
+        before = text[
+            max(0, match.start() - 50):
+            match.start()
+        ]
 
-        # Ignore unit prices such as $0.35/100g
+        after = text[
+            match.end():
+            match.end() + 30
+        ]
+
+        # Ignore delivery thresholds, minimum spends, vouchers, etc.
+        if _IGNORE_BEFORE.search(before):
+            continue
+
+        # Ignore unit prices such as "$0.35/100g".
         if after.lstrip().startswith("/"):
             continue
 
-        value = float(m.group(1).replace(",", ""))
+        value = float(
+            match.group(1).replace(",", "")
+        )
 
         if 0 < value <= 1000:
             prices.append(value)
@@ -92,93 +224,227 @@ def extract_price(text: str) -> float | None:
     if not prices:
         return None
 
-    # Sort prices from smallest to largest
-    prices.sort()
-
-    # 3 prices -> take the middle price
-    if len(prices) == 3:
-        return round(prices[1], 2)
-
-    # 2 prices -> take the larger/2nd price
-    if len(prices) == 2:
-        return round(prices[1], 2)
-
-    # 1 price -> take that price
+    # Preserve FairPrice page order.
+    # The first valid price is normally the current selling price.
     return round(prices[0], 2)
 
+
 def normalize(result: dict) -> dict | None:
-    """One Tavily result -> product dict, or None if it isn't a usable SG product page with a price."""
+    """
+    Convert one Tavily result into the grocery product format.
+
+    Returns None when the result is not a usable FairPrice product page
+    or when a reliable product price cannot be extracted.
+    """
+
     url = result.get("url") or ""
+
     domain, store = store_for(url)
-    if not domain or not is_product_page(url):
+
+    # FairPrice only.
+    if not domain:
         return None
-    title = clean_title(result.get("title") or "")
+
+    # Reject categories, searches, tags and promotional pages.
+    if not is_product_page(url):
+        return None
+
+    title = clean_title(
+        result.get("title") or ""
+    )
+
     snippet = result.get("content") or ""
     raw = result.get("raw_content") or ""
-    # Price: the search snippet first, then the page text after the product name
-    start = raw.lower().find(title.lower()[:30]) if title else -1
-    price = extract_price(
-    raw[max(start, 0):max(start, 0) + 3000]
-    ) or extract_price(snippet)
-    if not title or price is None:
+
+    if not title:
         return None
-    page_text = f"{snippet} {raw[max(start, 0):max(start, 0) + 1500]}"
+
+    # Try to locate the product title inside the raw page.
+    # Starting near the product name reduces the chance of reading
+    # unrelated prices elsewhere on a large page.
+    if raw:
+        start = raw.lower().find(
+            title.lower()[:30]
+        )
+    else:
+        start = -1
+
+    if start < 0:
+        start = 0
+
+    raw_price_section = raw[
+        start:
+        start + 3000
+    ]
+
+    # Prefer raw product-page content.
+    # Fall back to the Tavily search snippet if necessary.
+    price = extract_price(raw_price_section)
+
+    if price is None:
+        price = extract_price(snippet)
+
+    if price is None:
+        return None
+
+    page_text = (
+        f"{snippet} "
+        f"{raw[start:start + 1500]}"
+    )
+
+    size_text = (
+        f"{snippet[:500]} "
+        f"{raw[start:start + 500]}"
+    )
+
     return {
-        "product_id": hashlib.sha1(url.encode()).hexdigest()[:12],
+        "product_id": hashlib.sha1(
+            url.encode()
+        ).hexdigest()[:12],
+
         "title": title,
+
         "price": price,
+
         "currency": "SGD",
+
         "merchant_id": domain,
+
         "store": store,
+
         "url": url,
-        "size_text": f"{snippet[:500]} {raw[max(start, 0):max(start, 0) + 500]}",
+
+        "size_text": size_text,
+
         "availability": "local",
-        "in_stock": False if _OUT_OF_STOCK.search(page_text) else None,
+
+        "in_stock": (
+            False
+            if _OUT_OF_STOCK.search(page_text)
+            else None
+        ),
+
         "country_code": "SG",
+
         "region": "sg",
-        "source_updated_at": None,     # web pages don't say when the price was set
+
+        # FairPrice/Tavily pages do not reliably provide the date on
+        # which the displayed grocery price was last updated.
+        "source_updated_at": None,
     }
 
 
 class TavilyGroceryClient:
-    def __init__(self, api_key: str | None = None, max_results: int = 10, search_depth: str = "basic"):
-        self.api_key = api_key or os.environ.get("TAVILY_API_KEY", "")
+    """
+    Tavily client restricted to FairPrice grocery results.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_results: int = 10,
+        search_depth: str = "basic",
+    ):
+        self.api_key = (
+            api_key
+            or os.environ.get("TAVILY_API_KEY", "")
+        )
+
         self.max_results = max_results
         self.search_depth = search_depth
         self._client = None
 
     def _tavily(self):
         if self._client is None:
+
             if not self.api_key:
-                raise SearchError("TAVILY_API_KEY is not set (add it to .env)")
+                raise SearchError(
+                    "TAVILY_API_KEY is not set "
+                    "(add it to .env)"
+                )
+
             from tavily import TavilyClient
-            self._client = TavilyClient(api_key=self.api_key)
+
+            self._client = TavilyClient(
+                api_key=self.api_key
+            )
+
         return self._client
 
     def search_raw(self, query: str) -> dict:
+        """
+        Search FairPrice through Tavily.
+
+        The FairPrice restriction is handled by include_domains,
+        so the text query itself does not need to contain the store name.
+        """
+
         try:
             response = self._tavily().search(
-                query=f"price of {query} in Singapore",
-                search_depth=self.search_depth,
-                max_results=self.max_results,
-                include_domains=list(SG_GROCERY_DOMAINS),
-                include_raw_content="text",
-            )
+            query=f"price of {query} in Singapore",
+            search_depth=self.search_depth,
+            max_results=self.max_results,
+            include_domains=[GROCERY_DOMAIN],
+            include_raw_content="text",
+        )
+
             return response
 
         except SearchError:
             raise
-        except Exception as e:
+
+        except Exception as exc:
             raise SearchError(
-                f"Tavily search failed: {type(e).__name__}: {e}"
-            ) from e
-    def search(self, query: str, limit: int | None = None) -> list[dict]:
-        results = self.search_raw(query).get("results") or []
-        return [p for p in (normalize(r) for r in results) if p is not None]
+                f"Tavily search failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
-# if __name__ == "__main__":
-#     client = TavilyGroceryClient()
+    def search(
+        self,
+        query: str,
+        limit: int | None = None,
+    ) -> list[dict]:
 
-#     result = client.search_raw("eggs")
+        search_terms = [
+            query,
+            f"{query} grocery product",
+            f"buy {query}",
+        ]
 
-#     print(json.dumps(result, indent=2, ensure_ascii=False))
+        products = []
+        seen_urls = set()
+
+        for search_term in search_terms:
+
+            results = (
+                self.search_raw(search_term)
+                .get("results")
+                or []
+            )
+
+            normalized = [
+                product
+                for product in (
+                    normalize(result)
+                    for result in results
+                )
+                if product is not None
+            ]
+
+            for product in normalized:
+
+                url = product.get("url")
+
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    products.append(product)
+
+            # We found usable individual FairPrice products.
+            # Do not make unnecessary additional Tavily searches.
+            if products:
+                break
+
+        if limit is not None:
+            return products[:limit]
+
+        return products
