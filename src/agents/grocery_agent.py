@@ -16,9 +16,9 @@ from src.grocery.grocery_service import (
     GroceryService,
     grocery_summary,
 )
-from src.reasoning.budget_service import (
-    check_grocery_budget,
-    check_provisional_grocery_budget,
+
+from src.grocery.ollama_fallback_service import (
+    OllamaFallbackGroceryService,
 )
 from src.grocery.units import to_base
 from src.grocery.ingredient_conversions import (
@@ -45,7 +45,7 @@ class GroceryAgent:
         self.grocery_service = (
             grocery_service
             if grocery_service is not None
-            else GroceryService()
+            else OllamaFallbackGroceryService()
         )
     def run(
         self,
@@ -53,459 +53,164 @@ class GroceryAgent:
         missing_ingredients: list[dict] | dict,
         remaining_budget: float | None = None,
     ) -> dict:
+        """Return one unified shopping cost for Tavily and Ollama products.
+
+        A price is usable when the product has a positive package price and
+        a defensible package count. Source identity does not affect budget
+        classification. Unknown costs are never silently treated as zero.
         """
-        Find purchasable grocery options for missing ingredients.
-        GroceryService performs:
-        - FairPrice search
-        - product filtering
-        - price extraction
-        - package parsing
-        - package calculation
-        - minimum-package fallback
-        - caching
-        BudgetService performs:
-        - total known purchase cost checking
-        - budget feasibility
-        - remaining budget calculation
-        - unknown-cost handling
-        """
-        # ---------------------------------------------------------
-        # Validate recipe ID
-        # ---------------------------------------------------------
         if not recipe_id:
             return AgentResult(
-                agent="grocery",
-                status=AgentStatus.FAILED,
-                data={},
-                warnings=[],
-                errors=["recipe_id is required"],
+                agent="grocery", status=AgentStatus.FAILED, data={},
+                warnings=[], errors=["recipe_id is required"],
             ).to_dict()
-        # ---------------------------------------------------------
-        # Validate missing ingredients
-        # ---------------------------------------------------------
-        if not isinstance(
-            missing_ingredients,
-            (list, dict),
-        ):
+        if not isinstance(missing_ingredients, (list, dict)):
             return AgentResult(
-                agent="grocery",
-                status=AgentStatus.FAILED,
-                data={
-                    "recipe_id": recipe_id,
-                },
-                warnings=[],
-                errors=[
-                    "missing_ingredients must be a list or dictionary"
-                ],
+                agent="grocery", status=AgentStatus.FAILED,
+                data={"recipe_id": recipe_id}, warnings=[],
+                errors=["missing_ingredients must be a list or dictionary"],
             ).to_dict()
-        # ---------------------------------------------------------
-        # Nothing needs purchasing
-        # ---------------------------------------------------------
-        if not missing_ingredients:
-            budget_result = None
-            budget_status = "not_checked"
-            if remaining_budget is not None:
-                try:
-                    budget_result = check_grocery_budget(
-                        grocery_results={
-                            "priced_products": [],
-                            "incomplete_products": [],
-                            "missing_products": [],
-                        },
-                        remaining_budget=remaining_budget,
-                    )
-                    budget_status = budget_result["budget_status"]
-                except (TypeError, ValueError) as exc:
-                    return AgentResult(
-                        agent="grocery",
-                        status=AgentStatus.FAILED,
-                        data={
-                            "recipe_id": recipe_id,
-                        },
-                        warnings=[],
-                        errors=[
-                            f"Budget validation failed: {exc}"
-                        ],
-                    ).to_dict()
-            return AgentResult(
-                agent="grocery",
-                status=AgentStatus.SUCCESS,
-                data={
-                    "recipe_id": recipe_id,
-                    "items": [],
-                    "known_cost": 0.0,
-                    "all_items_priced": True,
-                    "unpriced_items": [],
-                    "projected_cost": 0.0,
-                    "projected_cost_complete": True,
-                    "projected_items": 0,
-                    "projection_missing": [],
-                    "budget": budget_result,
-                    "budget_status": budget_status,
-                    "remaining_budget": remaining_budget,
-                    "budget_after_purchase": (
-                        budget_result.get("budget_after_purchase")
-                        if budget_result is not None
-                        else None
-                    ),
-                },
-                warnings=[],
-                errors=[],
-            ).to_dict()
-        # ---------------------------------------------------------
-        # Call existing GroceryService
-        # ---------------------------------------------------------
+
+        def money(value):
+            if isinstance(value, bool):
+                return None
+            try:
+                value = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return value if math.isfinite(value) and value >= 0 else None
+
+        if isinstance(missing_ingredients, dict):
+            requested = list(missing_ingredients.keys())
+        else:
+            requested = [
+                str(x.get("ingredient_name") or x.get("ingredient") or "").strip()
+                for x in missing_ingredients if isinstance(x, dict)
+            ]
+        requested = [x for x in requested if x]
+
         try:
             options = (
-                self.grocery_service
-                .get_grocery_list(
-                    missing_ingredients,
-                    recipe_id=recipe_id,
-                )
+                self.grocery_service.get_grocery_list(
+                    missing_ingredients, recipe_id=recipe_id
+                ) if missing_ingredients else []
             )
-            # ---------------------------------------------------------
-            # Prevent empty grocery results from being treated
-            # as successfully priced purchases.
-            # ---------------------------------------------------------
-            if not options:
-                return AgentResult(
-                    agent="grocery",
-                    status=AgentStatus.PARTIAL,
-                    data={
-                        "recipe_id": recipe_id,
-                        "items": [],
-                        "known_cost": 0.0,
-                        "all_items_priced": False,
-                        "unpriced_items": [
-                            (
-                                item.get("ingredient_name")
-                                or item.get("ingredient")
-                            )
-                            for item in (
-                                missing_ingredients.values()
-                                if isinstance(missing_ingredients, dict)
-                                else missing_ingredients
-                            )
-                            if isinstance(item, dict)
-                        ] if isinstance(missing_ingredients, list) else list(missing_ingredients.keys()),
-                        "budget": None,
-                        "budget_status": "uncertain"
-                            if remaining_budget is not None
-                            else "not_checked",
-                        "remaining_budget": remaining_budget,
-                        "budget_after_purchase": None,
-                    },
-                    warnings=[
-                        "Grocery lookup returned no products for "
-                        "the requested missing ingredients."
-                    ],
-                    errors=[],
-                ).to_dict()
-            grocery_results = grocery_summary(options)
+            summary = grocery_summary(options) if options else {
+                "priced_products": [], "incomplete_products": [],
+                "missing_products": [],
+            }
         except Exception as exc:
             return AgentResult(
-                agent="grocery",
-                status=AgentStatus.FAILED,
-                data={
-                    "recipe_id": recipe_id,
-                },
-                warnings=[],
-                errors=[
-                    f"Grocery lookup failed: {exc}"
-                ],
+                agent="grocery", status=AgentStatus.FAILED,
+                data={"recipe_id": recipe_id}, warnings=[],
+                errors=[f"Grocery lookup failed: {exc}"],
             ).to_dict()
-        # ---------------------------------------------------------
-        # Known purchase cost
-        #
-        # Only products with a usable total_cost contribute.
-        # Missing/incomplete products are NOT treated as free.
-        # ---------------------------------------------------------
-        known_cost = round(
-            sum(
-                float(item["total_cost"])
-                for item in grocery_results["priced_products"]
-                if item.get("total_cost") is not None
-            ),
-            2,
-        )
-        # ---------------------------------------------------------
-        # Find items whose purchase cost is unknown
-        # ---------------------------------------------------------
-        unpriced_items = []
-        for item in grocery_results["incomplete_products"]:
-            ingredient = item.get("ingredient")
-            if ingredient:
-                unpriced_items.append(ingredient)
-        for item in grocery_results["missing_products"]:
-            ingredient = item.get("ingredient")
-            if ingredient:
-                unpriced_items.append(ingredient)
-        # Remove duplicates while preserving order.
-        unpriced_items = list(
-            dict.fromkeys(unpriced_items)
-        )
-        # ---------------------------------------------------------
-        # all_items_priced
-        # ---------------------------------------------------------
-        all_items_priced = (
-            len(unpriced_items) == 0
-        )
-        # ---------------------------------------------------------
-        # Warnings
-        # ---------------------------------------------------------
-        warnings = [
-            f"No complete purchase price found for {ingredient}"
-            for ingredient in unpriced_items
-        ]
-        # ---------------------------------------------------------
-        # Warn when one retail package is assumed sufficient.
-        #
-        # The purchase price is known, but exact quantity
-        # coverage has not been verified.
-        # ---------------------------------------------------------
-        for item in grocery_results["priced_products"]:
-            if (
-                item.get("purchase_basis") == "minimum_retail_package"
-                or item.get("match_status") == "matched_minimum_package"
-            ):
-                ingredient = item.get(
-                    "ingredient",
-                    "unknown ingredient",
-                )
-                warnings.append(
-                    f"{ingredient}: one retail package is "
-                    "assumed sufficient; exact quantity "
-                    "coverage is not verified."
-                )
-        # ---------------------------------------------------------
-        # Agent status
-        #
-        # success:
-        #   Every grocery item has a usable purchase cost.
-        #
-        # partial:
-        #   Some costs remain unknown.
-        #
-        # failed:
-        #   Invalid input or service failure.
-        # ---------------------------------------------------------
-        if all_items_priced:
-            status = AgentStatus.SUCCESS
-        else:
-            status = AgentStatus.PARTIAL
-        # ---------------------------------------------------------
-        # Combine grocery items
-        # ---------------------------------------------------------
+
         items = (
-            grocery_results["priced_products"]
-            + grocery_results["incomplete_products"]
-            + grocery_results["missing_products"]
+            list(summary.get("priced_products") or [])
+            + list(summary.get("incomplete_products") or [])
+            + list(summary.get("missing_products") or [])
         )
-        # ---------------------------------------------------------
-        # BUDGET SERVICE INTEGRATION
-        #
-        # Pass actual GroceryService results.
-        #
-        # BudgetService returns:
-        #   pass
-        #   hard_fail
-        #   uncertain
-        #
-        # If no budget was provided:
-        #   not_checked
-        # ---------------------------------------------------------
-        budget_result = None
-        budget_status = "not_checked"
-        if remaining_budget is not None:
-            try:
-                budget_result = check_grocery_budget(
-                    grocery_results=grocery_results,
-                    remaining_budget=remaining_budget,
-                )
-                budget_status = budget_result["budget_status"]
-            except (TypeError, ValueError) as exc:
-                return AgentResult(
-                    agent="grocery",
-                    status=AgentStatus.FAILED,
-                    data={
-                        "recipe_id": recipe_id,
-                        "items": items,
-                        "known_cost": known_cost,
-                        "all_items_priced": all_items_priced,
-                        "unpriced_items": unpriced_items,
-                    },
-                    warnings=warnings,
-                    errors=[
-                        f"Budget validation failed: {exc}"
-                    ],
-                ).to_dict()
-        # ---------------------------------------------------------
-        # PROVISIONAL BUDGET EVALUATION
-        #
-        # Separate from the existing BudgetService decision.
-        # Never overwrite budget_status or known_cost.
-        # ---------------------------------------------------------
-        estimated_budget_status = "not_checked"
-        estimated_budget_after_purchase = None
-        estimated_budget_reason = (
-            "No remaining budget was provided."
-        )
-        projected_cost = grocery_results.get("projected_cost")
-        projection_complete = grocery_results.get(
-            "projected_cost_complete",
-            False,
-        )
-        if remaining_budget is not None:
-            if (
-                not projection_complete
-                or projected_cost is None
-            ):
-                estimated_budget_status = "uncertain"
-                estimated_budget_reason = (
-                    "One or more grocery items have no "
-                    "reliable projected purchase cost."
-                )
-            else:
-                projected_remaining = round(
-                    float(remaining_budget)
-                    - float(projected_cost),
-                    2,
-                )
-                estimated_budget_after_purchase = (
-                    projected_remaining
-                )
-                if projected_remaining >= 0:
-                    estimated_budget_status = "pass"
-                    estimated_budget_reason = (
-                        "Projected grocery purchases fit "
-                        "within the available budget. "
-                        "This is a provisional estimate, "
-                        "not a verified purchase total."
+        priced = []
+        missing = []
+        warnings = []
+        total = 0.0
+
+        for item in items:
+            name = str(item.get("ingredient") or item.get("ingredient_name") or "").strip()
+            package_price = money(item.get("price_per_package"))
+            if package_price is None:
+                package_price = money(item.get("price"))
+            package_count = money(item.get("packages_needed"))
+            explicit_total = money(item.get("total_cost"))
+            if explicit_total is None:
+                explicit_total = money(item.get("estimated_total_cost"))
+
+            # A provided total is usable. Otherwise compute a package cost.
+            cost = explicit_total
+            if cost is None and package_price is not None and package_count is not None:
+                if package_count >= 1 and float(package_count).is_integer():
+                    cost = package_price * package_count
+            if cost is None and package_price is not None:
+                # One package is a shopping assumption, not quantity proof.
+                package_size = money(item.get("package_quantity"))
+                if package_size is not None and package_size > 0:
+                    cost = package_price
+                    warnings.append(
+                        f"{name}: one package assumed; quantity coverage not confirmed."
                     )
-                else:
-                    estimated_budget_status = "hard_fail"
-                    estimated_budget_reason = (
-                        "Projected grocery purchases exceed "
-                        "the available budget. "
-                        "This is a provisional estimate."
-                    )
-        # ---------------------------------------------------------
-        # PROVISIONAL BUDGET SERVICE RESULT
-        #
-        # Separate from the strict BudgetService result.
-        # Does not overwrite known_cost or budget_status.
-        # ---------------------------------------------------------
-        try:
-            provisional_budget_result = (
-                check_provisional_grocery_budget(
-                    projected_cost=projected_cost,
-                    projected_cost_complete=projection_complete,
-                    remaining_budget=remaining_budget,
-                    safety_margin=0.20,
-                )
+
+            if cost is None:
+                if name:
+                    missing.append(name)
+                    warnings.append(f"No usable grocery price found for {name}.")
+                item["pricing_status"] = "unpriced"
+                item["purchase_cost"] = None
+                continue
+            cost = round(cost, 2)
+            total += cost
+            item["purchase_cost"] = cost
+            item["effective_purchase_cost"] = cost
+            item["planning_purchase_cost"] = cost
+            item["pricing_status"] = "priced"
+            item["price_source"] = (
+                "ollama" if (
+                    item.get("purchase_basis") == "llm_estimated_package"
+                    or item.get("match_status") == "estimated_no_retail_match"
+                ) else "tavily"
             )
-        except (TypeError, ValueError) as exc:
-            return AgentResult(
-                agent="grocery",
-                status=AgentStatus.FAILED,
-                data={
-                    "recipe_id": recipe_id,
-                    "items": items,
-                    "known_cost": known_cost,
-                    "all_items_priced": all_items_priced,
-                    "unpriced_items": unpriced_items,
-                },
-                warnings=warnings,
-                errors=[
-                    f"Provisional budget validation failed: {exc}"
-                ],
-            ).to_dict()
-        # ---------------------------------------------------------
-        # OPTIONAL PLANNING BUDGET INFORMATION
-        #
-        # This does not modify BudgetService results.
-        # It does not turn LLM estimates into verified costs.
-        # ---------------------------------------------------------
-        planning_budget_status = budget_status
-        planning_budget_source = "verified"
-        if budget_status == "not_checked":
-            planning_budget_source = "not_checked"
-        elif (
-            budget_status == "uncertain"
-            and projection_complete
-            and projected_cost is not None
-        ):
-            if estimated_budget_status == "pass":
-                planning_budget_status = "provisional_pass"
-                planning_budget_source = "estimated"
-            elif estimated_budget_status == "hard_fail":
-                planning_budget_status = "provisional_hard_fail"
-                planning_budget_source = "estimated"
+            priced.append(item)
+
+        if not items and requested:
+            missing.extend(requested)
+        missing = list(dict.fromkeys(missing))
+        complete = not missing
+        total_cost = round(total, 2) if complete else None
+        budget_status = "not_checked"
+        budget_after_purchase = None
+        budget = None
+        if remaining_budget is not None:
+            available = money(remaining_budget)
+            if available is None:
+                return AgentResult(
+                    agent="grocery", status=AgentStatus.FAILED,
+                    data={"recipe_id": recipe_id}, warnings=warnings,
+                    errors=["remaining_budget must be nonnegative and finite"],
+                ).to_dict()
+            if total_cost is None:
+                budget_status = "uncertain"
             else:
-                planning_budget_status = "uncertain"
-                planning_budget_source = "incomplete"
-        elif budget_status == "uncertain":
-            planning_budget_source = "incomplete"
-        # ---------------------------------------------------------
-        # Shared AgentResult
-        # ---------------------------------------------------------
+                budget_after_purchase = round(available - total_cost, 2)
+                budget_status = "pass" if budget_after_purchase >= 0 else "hard_fail"
+            budget = {
+                "budget_status": budget_status,
+                "budget_after_purchase": budget_after_purchase,
+                "known_cost": round(total, 2),
+            }
+
+        data = {
+            "recipe_id": recipe_id,
+            "items": items,
+            "known_cost": round(total, 2),
+            "projected_cost": total_cost,  # Compatibility with planner.
+            "projected_cost_complete": complete,
+            "projected_items": len(priced),
+            "projection_missing": missing,
+            "all_items_priced": complete,
+            "unpriced_items": missing,
+            "budget": budget,
+            "budget_status": budget_status,
+            "planning_budget_status": budget_status,
+            "planning_budget_source": "unified",
+            "remaining_budget": remaining_budget,
+            "budget_after_purchase": budget_after_purchase,
+        }
         return AgentResult(
             agent="grocery",
-            status=status,
-            data={
-                "recipe_id": recipe_id,
-                "items": items,
-                "known_cost": known_cost,
-                # Provisional shopping estimate.
-                # Does not affect the verified budget decision.
-                "projected_cost": grocery_results.get(
-                    "projected_cost"
-                ),
-                "projected_cost_complete": grocery_results.get(
-                    "projected_cost_complete",
-                    False,
-                ),
-                "projected_items": grocery_results.get(
-                    "projected_items",
-                    0,
-                ),
-                "projection_missing": grocery_results.get(
-                    "projection_missing",
-                    [],
-                ),
-                "all_items_priced": all_items_priced,
-                "unpriced_items": unpriced_items,
-                # BudgetService results
-                "budget": budget_result,
-                "budget_status": budget_status,
-                "estimated_budget_status": (
-                    estimated_budget_status
-                ),
-                "estimated_budget_after_purchase": (
-                    estimated_budget_after_purchase
-                ),
-                "estimated_budget_reason": (
-                    estimated_budget_reason
-                ),
-                 "planning_budget_status": (
-                    planning_budget_status
-                ),
-                "planning_budget_source": (
-                    planning_budget_source
-                ),
-                "provisional_budget": (
-                    provisional_budget_result
-                ),
-                "remaining_budget": remaining_budget,
-                "budget_after_purchase": (
-                    budget_result.get("budget_after_purchase")
-                    if budget_result is not None
-                    else None
-                ),
-            },
-            warnings=warnings,
-            errors=[],
+            status=AgentStatus.SUCCESS if complete else AgentStatus.PARTIAL,
+            data=data, warnings=warnings, errors=[],
         ).to_dict()
+
 # ============================================================
 # DAY 5 - PLAN-LEVEL GROCERY AGGREGATION
 # Member 4
@@ -625,61 +330,6 @@ def normalize_requirement_quantity(name, quantity, unit):
         "original_quantity": original_quantity,
         "original_unit": original_unit,
     }
-# def normalize_requirement_quantity(name, quantity, unit):
-#     original_quantity = quantity
-#     original_unit = str(unit or "").strip().lower()
-#     ingredient_name = " ".join(str(name or "").lower().split())
-#     try:
-#         quantity = float(quantity)
-#     except (TypeError, ValueError, OverflowError):
-#         return None
-#     if not math.isfinite(quantity) or quantity <= 0:
-#         return None
-#     unit = original_unit
-#     # A pinch is not a standard liquid measurement.
-#     # This is an explicitly provisional MVP assumption.
-#     if ingredient_name == "sesame oil" and unit in {
-#         "pinch",
-#         "pinches",
-#     }:
-#         return {
-#             "quantity": round(quantity * 0.25, 4),
-#             "unit": "ml",
-#             "conversion_status": "estimated",
-#             "original_quantity": original_quantity,
-#             "original_unit": original_unit,
-#         }
-#     # Ingredient-specific mass conversions first.
-#     estimated = estimate_ingredient_mass(
-#         name,
-#         quantity,
-#         unit,
-#     )
-#     if estimated is not None:
-#         return {
-#             "quantity": estimated[0],
-#             "unit": estimated[1],
-#             "conversion_status": "estimated",
-#             "original_quantity": original_quantity,
-#             "original_unit": original_unit,
-#         }
-#     # General physical-unit conversion.
-#     exact = to_base(quantity, unit)
-#     if exact is not None:
-#         return {
-#             "quantity": exact[0],
-#             "unit": exact[1],
-#             "conversion_status": "exact",
-#             "original_quantity": original_quantity,
-#             "original_unit": original_unit,
-#         }
-#     return {
-#         "quantity": quantity,
-#         "unit": unit,
-#         "conversion_status": "unresolved",
-#         "original_quantity": original_quantity,
-#         "original_unit": original_unit,
-#     }
 def aggregate_requirements(recipe_requirements):
     """
     Aggregate ingredient requirements across selected recipes.
@@ -758,62 +408,6 @@ def aggregate_requirements(recipe_requirements):
                 record["normalization_status"] = "unresolved"
                 record["unresolved_units"] = units
     return list(aggregated.values())
-# def subtract_inventory(requirements, inventory):
-#     """
-#     Deduct pantry stock from aggregated requirements.
-#     Does not mutate the original inventory.
-#     Does not consume the same pantry stock twice.
-#     """
-#     stock_map = {}
-#     for item in inventory or []:
-        
-#         key = _ingredient_key(item)
-#         if not key:
-#             continue
-#         name = _ingredient_name(item)
-#         normalized = normalize_requirement_quantity(
-#             name,
-#             item.get("quantity"),
-#             item.get("unit"),
-#         )
-#         if normalized is None:
-#             continue
-#         stock_map.setdefault(key, []).append({
-#             "quantity": normalized["quantity"],
-#             "unit": normalized["unit"],
-#             "conversion_status": normalized["conversion_status"],
-#         })
-#     results = []
-#     for requirement in requirements or []:
-#         key = _ingredient_key(requirement)
-#         required = float(requirement.get("quantity", 0))
-#         required_unit = requirement.get("unit")
-#         remaining = required
-#         inventory_used = 0.0
-#         inventory_unresolved = False
-#         for stock in stock_map.get(key, []):
-#             if remaining <= 0:
-#                 break
-#             # Requirements and inventory must share a
-#             # comparable normalized unit.
-#             if stock["unit"] != required_unit:
-#                 inventory_unresolved = True
-#                 continue
-#             available = max(0.0, stock["quantity"])
-#             consumed = min(remaining, available)
-#             remaining -= consumed
-#             inventory_used += consumed
-#             stock["quantity"] -= consumed
-#         result = dict(requirement)
-#         result.update({
-#             "required_quantity": required,
-#             "inventory_available": inventory_used,
-#             "inventory_used": inventory_used,
-#             "purchase_required": max(0.0, remaining),
-#             "inventory_conversion_unresolved": inventory_unresolved,
-#         })
-#         results.append(result)
-#     return results
 def subtract_inventory(requirements, inventory):
     """
     Deduct pantry stock from aggregated requirements.
@@ -1150,6 +744,54 @@ def build_plan_grocery_basket(
         return (
             quantity * source[1] / target[1]
         )
+    def convert_using_original_requirements(
+        requirement,
+        package_unit,
+    ):
+        """
+        Use original recipe units when normalized conversion
+        is unresolved or less useful than the original units.
+
+        Returns:
+            (quantity, conversion_status)
+
+        The result is exact only when every source requirement
+        can be converted directly into package units.
+        """
+
+        sources = requirement.get(
+            "source_requirements"
+        ) or []
+
+        if not sources:
+            return None, "unresolved"
+
+        total = 0.0
+
+        for source in sources:
+            quantity = positive_number(
+                source.get("quantity")
+            )
+
+            if quantity is None:
+                return None, "unresolved"
+
+            source_unit = normalize_unit(
+                source.get("unit")
+            )
+
+            converted = convert_requirement(
+                quantity,
+                source_unit,
+                package_unit,
+            )
+
+            if converted is None:
+                return None, "unresolved"
+
+            total += converted
+
+        return total, "exact"
     def estimate_package_conversion(
         quantity,
         from_unit,
@@ -1157,8 +799,7 @@ def build_plan_grocery_basket(
         ingredient_name,
     ):
         """Estimate package units through ingredient-specific mass data.
-        This is a provisional fallback only. It must not be treated
-        as exact retail quantity coverage.
+        This is an estimated conversion, not exact quantity coverage.
         """
         from_unit = normalize_unit(from_unit)
         to_unit = normalize_unit(to_unit)
@@ -1259,22 +900,19 @@ def build_plan_grocery_basket(
                 "inventory_conversion_unresolved", False
             ),
         }
-        if (
+        conversion_unresolved = (
             requirement.get("normalization_status")
             == "unresolved"
             or requirement.get("conversion_status")
             == "unresolved"
-        ):
-            base_item["pricing_status"] = "unresolved_conversion"
-            base_item["price_source"] = "unknown"
-            unpriced_items.append(ingredient_name)
-            projection_missing.append(ingredient_name)
+        )
+
+        if conversion_unresolved:
             warnings.append(
-                f"{ingredient_name}: unresolved quantity conversion. "
-                "Purchase quantity cannot be verified."
+                f"{ingredient_name}: normalized quantity conversion "
+                "is unresolved. Original recipe units will be "
+                "checked against the retail package."
             )
-            basket_items.append(base_item)
-            continue
         if product is None:
             unpriced_items.append(ingredient_name)
             projection_missing.append(ingredient_name)
@@ -1330,15 +968,41 @@ def build_plan_grocery_basket(
         # Preserve the existing strict plan-basket
         # contract for different unit strings.
         #
-        # A separate provisional calculation can
-        # still be added later without changing
-        # pricing_status.
         converted_required = convert_requirement(
             required,
             required_unit,
             package_unit,
         )
-        estimated_package_conversion = False
+
+        estimated_package_conversion = (
+            requirement.get("conversion_status") == "estimated"
+        )
+
+        original_converted, original_status = (
+            convert_using_original_requirements(
+                requirement,
+                package_unit,
+            )
+        )
+        original_conversion_exact = (
+            original_converted is not None
+            and original_status == "exact"
+        )
+
+        # Prefer original units when they provide an exact,
+        # directly comparable retail package quantity.
+        if (
+            original_conversion_exact
+            and (
+                converted_required is None
+                or conversion_unresolved
+                or estimated_package_conversion
+            )
+        ):
+            
+            converted_required = original_converted
+            estimated_package_conversion = False
+            conversion_unresolved = False
         if converted_required is None:
             converted_required = estimate_package_conversion(
                 required,
@@ -1372,16 +1036,24 @@ def build_plan_grocery_basket(
                 "inventory_conversion_unresolved", False
             )
             quantity_supported = (
-                conversion_is_exact
-                and not estimated_package_conversion
-                and normalization_resolved
-                and inventory_resolved
+                inventory_resolved
+                and (
+                    (
+                        conversion_is_exact
+                        and not estimated_package_conversion
+                        and normalization_resolved
+                    )
+                    or (
+                        original_conversion_exact
+                        and not estimated_package_conversion
+                    )
+                )
             )
             if estimated_package_conversion:
                 warnings.append(
                     f"{ingredient_name}: estimated ingredient-specific "
                     "conversion used for package sizing; quantity "
-                    "coverage is provisional."
+                    "coverage is not confirmed."
                 )
             is_llm_product = (
                 product.get("purchase_basis") == "llm_estimated_package"
@@ -1389,16 +1061,24 @@ def build_plan_grocery_basket(
             )
             if quantity_supported:
                 purchase_basis = "calculated_quantity"
-            elif is_llm_product:
-                purchase_basis = "minimum_retail_package"
-            else:
+
+            elif (
+                converted_required is not None
+                and original_conversion_exact
+                and not estimated_package_conversion
+            ):
+                purchase_basis = "calculated_quantity"
+
+            elif converted_required is not None:
                 purchase_basis = "estimated_quantity"
+
+            else:
+                purchase_basis = "minimum_retail_package"
         else:
             # No reliable conversion exists between the
             # required ingredient unit and retail package unit.
             #
-            # One package is only a provisional shopping
-            # suggestion, NOT proof of sufficient inventory.
+            # One package is a shopping assumption, NOT proof of sufficient inventory.
 
             packages = 1
 
@@ -1418,7 +1098,7 @@ def build_plan_grocery_basket(
                 f"{ingredient_name}: package coverage unresolved "
                 f"(required {required} {required_unit}, "
                 f"package {package_quantity} {package_unit}). "
-                "One package is a provisional minimum purchase; "
+                "One package is assumed for shopping; "
                 "inventory sufficiency is not verified."
             )
         estimated_purchase_cost = round(
@@ -1430,75 +1110,25 @@ def build_plan_grocery_basket(
         # evidence is available in the catalog.
         #
         # The current planner strips that metadata,
-        # so its reduced catalog normally remains
-        # provisional.
-        retail_total = positive_number(
-            product.get("total_cost")
+
+        # UNIFIED PRICE CALCULATION
+        # Both Tavily and Ollama package prices count equally.
+
+        known_cost += estimated_purchase_cost
+
+        base_item["purchase_cost"] = estimated_purchase_cost
+        base_item["estimated_purchase_cost"] = None
+        base_item["pricing_status"] = "priced"
+
+        # Retain provenance for diagnostics only.
+        is_ollama = (
+            product.get("purchase_basis") == "llm_estimated_package"
+            or product.get("match_status") == "estimated_no_retail_match"
         )
-        estimated_total = positive_number(
-            product.get("estimated_total_cost")
+
+        base_item["price_source"] = (
+            "ollama" if is_ollama else "tavily"
         )
-        source_basis = product.get("purchase_basis")
-        source_status = product.get("match_status")
-        is_llm = (
-            source_basis == "llm_estimated_package"
-            or source_status == "estimated_no_retail_match"
-        )
-        has_estimated_quantity = (
-            product.get("quantity_estimated") is True
-            or source_basis == "estimated_quantity"
-            or source_status == "matched_estimated_quantity"
-        )
-        has_estimated_source = (
-            estimated_total is not None
-            and retail_total is None
-        )
-        has_retail_evidence = (
-            price is not None
-            and not is_llm
-            and not has_estimated_quantity
-            and not has_estimated_source
-        )
-        conversion_is_exact = (
-            requirement.get("conversion_status", "exact") == "exact"
-        )
-        normalization_resolved = (
-            requirement.get("normalization_status", "resolved")
-            == "resolved"
-        )
-        inventory_resolved = not requirement.get(
-            "inventory_conversion_unresolved", False
-        )
-        if (
-            has_retail_evidence
-            and quantity_supported
-            and conversion_is_exact
-            and normalization_resolved
-            and inventory_resolved
-        ):
-            known_cost += estimated_purchase_cost
-            base_item["purchase_cost"] = (
-                estimated_purchase_cost
-            )
-            base_item["pricing_status"] = "priced"
-            base_item["price_source"] = "retail"
-        else:
-            base_item["estimated_purchase_cost"] = (
-                estimated_purchase_cost
-            )
-            base_item["pricing_status"] = "estimated"
-            base_item["price_source"] = (
-                "ollama_estimate"
-                if is_llm
-                else (
-                    "retail_estimated_quantity"
-                    if (
-                        has_estimated_quantity
-                        or not conversion_is_exact
-                    )
-                    else "unverified"
-                )
-            )
 
         # Accepted cost for meal planning and budgeting.
         # Includes both Tavily and Ollama prices.
@@ -1526,9 +1156,8 @@ def build_plan_grocery_basket(
         })
         # Usable purchase cost for shopping and planning.
         # This includes verified retailer costs and
-        # provisional Tavily/Ollama estimates.
+        # prices from either source.
         #
-        # Keep purchase_cost as verified-only.
         effective_cost = (
             base_item.get("purchase_cost")
         )
@@ -1551,6 +1180,145 @@ def build_plan_grocery_basket(
             base_item.get("pricing_status") != "priced"
         )
         basket_items.append(base_item)
+    
+    # Add qualitative requirements without inventing recipe quantities.
+    existing_ids = {
+        str(item["ingredient_id"]).strip()
+        for item in basket_items
+        if item.get("ingredient_id")
+    }
+
+    existing_names = {
+        str(item.get("name") or "").strip().lower()
+        for item in basket_items
+    }
+
+    for requirement in qualitative_requirements:
+        ingredient_id = requirement.get("ingredient_id")
+        ingredient_name = str(
+            requirement.get("ingredient_name") or ""
+        ).strip()
+
+        if not ingredient_name:
+            continue
+
+        if (
+            (ingredient_id and str(ingredient_id).strip() in existing_ids)
+            or ingredient_name.lower() in existing_names
+        ):
+            continue
+
+        product = find_plan_product(
+            requirement,
+            product_catalog,
+        )
+
+        package_quantity = (
+            positive_number(product.get("package_quantity"))
+            if product else None
+        )
+
+        package_unit = (
+            normalize_unit(product.get("package_unit"))
+            if product else None
+        )
+
+        price = None
+        if product:
+            price = positive_number(
+                product.get("price")
+                if product.get("price") is not None
+                else product.get("price_per_package")
+            )
+
+        usable_package = (
+            price is not None
+            and package_quantity is not None
+            and bool(package_unit)
+            and not implausible_package(
+                package_quantity,
+                package_unit,
+                ingredient_name,
+            )
+        )
+
+        item = {
+            "ingredient_id": ingredient_id,
+            "name": ingredient_name,
+            "required_quantity": None,
+            "required_unit": requirement.get("unit") or "unknown",
+            "instruction": requirement.get("instruction"),
+            "package_quantity": package_quantity,
+            "package_unit": package_unit,
+            "packages": None,
+            "purchased_quantity": None,
+            "price_per_package": price,
+            "purchase_cost": None,
+            "estimated_purchase_cost": None,
+            "effective_purchase_cost": None,
+            "display_cost": None,
+            "has_usable_price": False,
+            "cost_is_estimated": False,
+            "leftover_quantity": None,
+            "inventory_used": 0.0,
+            "recipe_ids": requirement.get("recipe_ids", []),
+            "pricing_status": "unpriced",
+            "price_source": "unknown",
+            "purchase_basis": "qualitative_requirement",
+            "quantity_coverage_verified": False,
+            "status": "quantity_unknown",
+        }
+
+       
+        if usable_package:
+            package_cost = round(price, 2)
+
+            known_cost += package_cost
+            projected_cost += package_cost
+
+            is_ollama = (
+                product.get("purchase_basis")
+                == "llm_estimated_package"
+                or product.get("match_status")
+                == "estimated_no_retail_match"
+            )
+
+            item.update({
+                "packages": 1,
+                "purchased_quantity": package_quantity,
+                "purchase_cost": package_cost,
+                "estimated_purchase_cost": None,
+                "effective_purchase_cost": package_cost,
+                "display_cost": package_cost,
+                "planning_purchase_cost": package_cost,
+                "has_usable_price": True,
+                "cost_is_estimated": False,
+                "pricing_status": "priced",
+                "price_source": (
+                    "ollama" if is_ollama else "tavily"
+                ),
+                "package_conversion_status": "unresolved",
+                "quantity_coverage_verified": False,
+            })
+
+            warnings.append(
+                f"{ingredient_name}: recipe quantity is unspecified; "
+                "one package was assumed for shopping."
+            )
+        else:
+            projection_missing.append(ingredient_name)
+            warnings.append(
+                f"{ingredient_name}: no usable package price available."
+            )
+
+
+        basket_items.append(item)
+
+        if ingredient_id:
+            existing_ids.add(str(ingredient_id).strip())
+
+        existing_names.add(ingredient_name.lower())
+
     unpriced_items = list(
         dict.fromkeys(
             item.get("name")
@@ -1579,10 +1347,6 @@ def build_plan_grocery_basket(
             item.get("pricing_status") == "priced"
             for item in basket_items
         ),
-        "all_items_have_usable_cost": all(
-            item.get("effective_purchase_cost") is not None
-            for item in basket_items
-        ),
         "qualitative_requirements": qualitative_requirements,
         "unpriced_items": unpriced_items,
         "aggregated_requirements": aggregated,
@@ -1597,10 +1361,8 @@ def build_plan_grocery_basket(
         ),
         "projection_missing": projection_missing,
         "warnings": warnings,
-                "all_items_have_usable_cost": (
-            all_items_have_usable_cost
-        ),
-          "planning_cost": (
+        "all_items_have_usable_cost": all_items_have_usable_cost,
+        "planning_cost": (
             round(projected_cost, 2)
             if projection_complete
             else None
@@ -1618,7 +1380,7 @@ def calculate_incremental_basket_cost(
     caused by adding one candidate recipe.
     Both baskets use the SAME original inventory
     and product catalog.
-    Verified and estimated costs remain separate.
+    Both price sources contribute to the same shopping total.
     """
     import math
     selected = list(selected_recipe_requirements or [])
@@ -1772,175 +1534,62 @@ def calculate_incremental_basket_cost(
             after.get("projection_missing", [])
         ),
     }
-def build_cost_summary(
-    grocery_basket,
-    initial_budget,
-):
+def build_cost_summary(grocery_basket, initial_budget):
+    """Summarize one shopping total regardless of Tavily/Ollama source.
+
+    Legacy projected_* keys are retained solely for planner compatibility.
     """
-    Summarize verified and projected grocery spending.
-    Known cost:
-        Cost supported by verified retail pricing rules.
-    Projected cost:
-        Complete grocery estimate, including Tavily
-        and Ollama prices and provisional quantities.
-    Both Tavily and Ollama prices count equally toward
-    projected grocery spending.
-    A complete projection is not necessarily verified.
-    """
-    import math
-    def valid_money(value, field_name):
+    def valid_money(value, field):
         if isinstance(value, bool):
-            raise ValueError(
-                f"{field_name} must be numeric"
-            )
+            raise ValueError(f"{field} must be numeric")
         try:
-            number = float(value)
-        except (
-            TypeError,
-            ValueError,
-            OverflowError,
-        ):
-            raise ValueError(
-                f"{field_name} must be numeric"
-            ) from None
-        if not math.isfinite(number) or number < 0:
-            raise ValueError(
-                f"{field_name} must be finite and nonnegative"
-            )
-        return round(number, 2)
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"{field} must be numeric") from None
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{field} must be finite and nonnegative")
+        return round(value, 2)
+
     if not isinstance(grocery_basket, dict):
-        raise TypeError(
-            "grocery_basket must be a dictionary"
-        )
-    initial_budget = valid_money(
-        initial_budget,
-        "initial_budget",
-    )
-    known_cost = valid_money(
-        grocery_basket.get("known_cost", 0),
-        "known_cost",
-    )
-    projection_complete = (
-        grocery_basket.get(
-            "projected_cost_complete"
-        ) is True
-    )
-    raw_projected = grocery_basket.get(
-        "projected_cost"
-    )
-    projected_cost = None
-    if (
-        projection_complete
-        and raw_projected is not None
-    ):
-        projected_cost = valid_money(
-            raw_projected,
-            "projected_cost",
-        )
-        if projected_cost + 0.01 < known_cost:
-            raise ValueError(
-                "Projected cost cannot be below known cost"
-            )
-    else:
-        projection_complete = False
-    known_remaining = round(
-        initial_budget - known_cost,
-        2,
-    )
-    projected_remaining = (
-        round(
-            initial_budget - projected_cost,
-            2,
-        )
-        if projected_cost is not None
-        else None
-    )
-    unpriced_items = list(
-        grocery_basket.get(
-            "unpriced_items", []
-        ) or []
-    )
-    projection_missing = list(
-        grocery_basket.get(
-            "projection_missing", []
-        ) or []
-    )
-    estimated_component = (
-        round(
-            projected_cost - known_cost,
-            2,
-        )
-        if projected_cost is not None
-        else None
-    )
-    # Preserve the existing verified-price contract.
-    # Do not infer verification merely because every
-    # ingredient has a usable projected price.
-    all_items_priced = (
-        grocery_basket.get(
-            "all_items_priced"
-        ) is True
-    )
-    # Tavily and Ollama estimates are both accepted
-    # as usable planning costs when the complete
-    # projected grocery basket is available.
-    all_items_have_usable_cost = (
-        grocery_basket.get(
-            "all_items_have_usable_cost"
-        ) is True
-        or projection_complete
-    )
-    # Verified means all items have verified pricing.
-    # Provisional means a complete projected cost exists,
-    # but one or more prices or quantities are estimated.
-    # Incomplete means no complete cost is available.
-    if (
-        all_items_priced
-        and projection_complete
-        and projected_cost is not None
-    ):
-        budget_verification = "verified"
-    elif (
-        projection_complete
-        and projected_cost is not None
-    ):
-        budget_verification = "provisional"
-    else:
-        budget_verification = "incomplete"
+        raise TypeError("grocery_basket must be a dictionary")
+    budget = valid_money(initial_budget, "initial_budget")
+    known = valid_money(grocery_basket.get("known_cost", 0), "known_cost")
+    complete = grocery_basket.get("projected_cost_complete") is True
+    raw_total = grocery_basket.get("projected_cost")
+    total = valid_money(raw_total, "projected_cost") if complete and raw_total is not None else None
+    if total is None:
+        complete = False
+    if total is not None and total + 0.01 < known:
+        raise ValueError("Projected cost cannot be below known cost")
+    missing = list(grocery_basket.get("projection_missing") or [])
+    unpriced = list(grocery_basket.get("unpriced_items") or [])
+    # The legacy unpriced_items field can describe items with no verified
+    # retailer price even when the combined shopping cost is available.
+    # Only genuinely missing purchase costs invalidate the total.
+    if missing:
+        complete = False
+        total = None
+    remaining = round(budget - known, 2)
+    total_remaining = round(budget - total, 2) if total is not None else None
     return {
-        "initial_budget": initial_budget,
-        "known_grocery_cost": known_cost,
-        "remaining": known_remaining,
-        "all_items_priced": all_items_priced,
-        "all_items_have_usable_cost": (
-            all_items_have_usable_cost
-        ),
-        "unpriced_items": unpriced_items,
-        "projected_grocery_cost": projected_cost,
-        "projected_cost_complete": (
-            projection_complete
-        ),
-        "estimated_cost_component": (
-            estimated_component
-        ),
-        "known_remaining_budget": (
-            known_remaining
-        ),
-        "projected_remaining_budget": (
-            projected_remaining
-        ),
-        "projection_missing": (
-            projection_missing
-        ),
-        "known_cost_within_budget": (
-            known_cost <= initial_budget
-        ),
+        "initial_budget": budget,
+        "known_grocery_cost": known,
+        "remaining": remaining,
+        "all_items_priced": grocery_basket.get("all_items_priced") is True,
+        "all_items_have_usable_cost": complete,
+        "unpriced_items": unpriced,
+        "projected_grocery_cost": total,
+        "projected_cost_complete": complete,
+        "estimated_cost_component": None,
+        "known_remaining_budget": remaining,
+        "projected_remaining_budget": total_remaining,
+        "projection_missing": missing,
+        "known_cost_within_budget": known <= budget,
         "projected_cost_within_budget": (
-            projected_cost <= initial_budget
-            if projected_cost is not None
-            else None
+            total <= budget if total is not None else None
         ),
         "budget_verification": (
-            budget_verification
+            "verified" if complete and grocery_basket.get("all_items_priced") is True
+            else "complete" if complete else "incomplete"
         ),
     }

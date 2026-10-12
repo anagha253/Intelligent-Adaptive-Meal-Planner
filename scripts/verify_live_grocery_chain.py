@@ -2,7 +2,9 @@
 from src.agents.ingredient_agent import IngredientAgent
 from src.agents.grocery_agent import GroceryAgent
 from src.agents.contracts import normalize_agent_result
-from src.grocery.grocery_service import GroceryService
+from src.grocery.ollama_fallback_service import (
+    OllamaFallbackGroceryService,
+)
 
 
 def main():
@@ -59,7 +61,7 @@ def main():
         )
 
     grocery_agent = GroceryAgent(
-        grocery_service=GroceryService()
+        grocery_service=OllamaFallbackGroceryService()
     )
 
     grocery_result = normalize_agent_result(

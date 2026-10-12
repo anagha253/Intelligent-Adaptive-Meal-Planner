@@ -137,6 +137,30 @@ class OllamaFallbackGroceryService(GroceryService):
         if option.estimated_total_cost is not None:
             return option
 
+
+        
+        # Normalize missing units for the Ollama request.
+        # Preserve the original GroceryOption requirement.
+
+        ollama_unit = str(unit or "").strip().lower()
+
+        if ollama_unit in {"nan", "none", "null", ""}:
+            ingredient_key = " ".join(
+                str(ingredient_name or "").lower().split()
+            )
+
+            if ingredient_key in {
+                "lemon", "lemons",
+                "orange", "oranges",
+                "lime", "limes",
+                "apple", "apples",
+                "egg", "eggs",
+            }:
+                ollama_unit = "count"
+            else:
+                ollama_unit = None
+
+
         # --------------------------------------------------
         # 2. Build deterministic cache keys
         # --------------------------------------------------
@@ -144,7 +168,7 @@ class OllamaFallbackGroceryService(GroceryService):
         request_key = (
             " ".join(str(ingredient_name or "").lower().split()),
             str(required_quantity),
-            str(unit or "").strip().lower(),
+            str(ollama_unit or ""),
             OLLAMA_MODEL,
             OLLAMA_ESTIMATE_VERSION,
         )
@@ -235,16 +259,22 @@ class OllamaFallbackGroceryService(GroceryService):
             estimate = estimate_grocery_price(
                 ingredient_name=ingredient_name,
                 required_quantity=required_quantity,
-                required_unit=unit,
+                required_unit=ollama_unit,
             )
 
-            if not _valid_ollama_estimate(estimate):
-                option.note = (
-                    (option.note or "")
-                    + " Ollama could not provide a usable estimate."
-                ).strip()
+        if not _valid_ollama_estimate(estimate):
+            print("\n[OLLAMA ESTIMATE REJECTED]")
+            print("Ingredient:", ingredient_name)
+            print("Required quantity:", required_quantity)
+            print("Required unit:", unit)
+            print("Raw estimate:", repr(estimate))
 
-                return option
+            option.note = (
+                (option.note or "")
+                + " Ollama could not provide a usable estimate."
+            ).strip()
+
+            return option
 
             # Save only valid estimates in memory.
             self._ollama_estimate_cache[
@@ -287,8 +317,13 @@ class OllamaFallbackGroceryService(GroceryService):
         )
 
         option.minimum_package_cost = None
-        option.total_cost = None
 
+        # Both Tavily and Ollama costs enter the same grocery total.
+        option.total_cost = float(
+            estimate.estimated_total_cost
+        )
+
+        # Preserve the legacy field for compatibility.
         option.estimated_total_cost = float(
             estimate.estimated_total_cost
         )

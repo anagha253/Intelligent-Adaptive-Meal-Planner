@@ -521,7 +521,7 @@ def test_grocery_agent_matches_shared_contract():
 
 
 
-def test_provisional_planning_budget_status():
+def test_ollama_price_counts_as_regular_grocery_cost():
     from unittest.mock import Mock
 
     from src.agents.grocery_agent import GroceryAgent
@@ -566,20 +566,18 @@ def test_provisional_planning_budget_status():
 
     data = result["data"]
 
-    assert data["known_cost"] == 0.0
-    assert data["all_items_priced"] is False
-    assert data["projected_cost"] == 1.5
-    assert data["projected_cost_complete"] is True
+    assert result["status"] == "success"
 
-    assert data["budget_status"] == "uncertain"
-    assert data["estimated_budget_status"] == "pass"
+    # Ollama and Tavily prices are treated equally.
+    assert data["known_cost"] == 1.50
+    assert data["projected_cost"] == 1.50
 
-    assert (
-        data["planning_budget_status"]
-        == "provisional_pass"
-    )
+    assert data["all_items_priced"] is True
+    assert data["unpriced_items"] == []
 
-    assert (
-        data["planning_budget_source"]
-        == "estimated"
-    )
+    assert data["budget_status"] == "pass"
+    assert data["planning_budget_status"] == "pass"
+
+    assert data["budget_after_purchase"] == 48.50
+
+    assert data["items"][0]["price_source"] == "ollama"

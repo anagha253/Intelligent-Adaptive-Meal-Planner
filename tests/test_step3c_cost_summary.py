@@ -23,24 +23,34 @@ def test_complete_verified_basket():
     assert result["budget_verification"] == "verified"
 
 
-def test_provisional_basket():
+def test_unified_grocery_cost_summary():
     basket = {
-        "known_cost": 20.0,
+        "known_cost": 28.0,
         "projected_cost": 28.0,
         "projected_cost_complete": True,
-        "all_items_priced": False,
-        "unpriced_items": ["butter lettuce"],
+        "all_items_priced": True,
+        "unpriced_items": [],
         "projection_missing": [],
     }
 
-    result = build_cost_summary(basket, 50.0)
+    result = build_cost_summary(
+        basket,
+        50.0,
+    )
 
-    assert result["known_grocery_cost"] == 20.0
+    assert result["known_grocery_cost"] == 28.0
     assert result["projected_grocery_cost"] == 28.0
-    assert result["estimated_cost_component"] == 8.0
-    assert result["known_remaining_budget"] == 30.0
+
+    assert result["remaining"] == 22.0
     assert result["projected_remaining_budget"] == 22.0
-    assert result["budget_verification"] == "provisional"
+
+    assert result["all_items_priced"] is True
+    assert result["projected_cost_complete"] is True
+
+    assert result["budget_verification"] == "verified"
+
+    # No separate estimated-price component.
+    assert result.get("estimated_cost_component") in (None, 0.0)
 
 
 def test_incomplete_projection():
