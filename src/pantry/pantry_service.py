@@ -27,16 +27,37 @@ def normalize_unit(unit):
     return str(unit).strip().lower()
 
 
+# def is_unknown_quantity(quantity):
+#     """Check whether quantity is missing/NaN."""
+#     if quantity is None:
+#         return True
+
+#     try:
+#         return math.isnan(float(quantity))
+#     except (TypeError, ValueError):
+#         return False
 def is_unknown_quantity(quantity):
-    """Check whether quantity is missing/NaN."""
+    """Check whether quantity is unknown or nonnumeric."""
+
     if quantity is None:
         return True
+
+    if isinstance(quantity, str):
+        if quantity.strip().lower() in {
+            "",
+            "unknown",
+            "required",
+            "to taste",
+            "as needed",
+            "none",
+            "nan",
+        }:
+            return True
 
     try:
         return math.isnan(float(quantity))
     except (TypeError, ValueError):
-        return False
-
+        return True
 
 def load_pantry():
     """Load pantry data from JSON."""
@@ -177,7 +198,10 @@ def filter_ingredient_list(pantry_data, ingredient_names):
 
             grocery_list[ingredient] = grocery_item
             continue
-
+        if is_unknown_quantity(available):
+            grocery_item["status"] = "quantity_unknown"
+            grocery_list[ingredient] = grocery_item
+            continue
         # Unit mismatch
         # Member 3's normalization should eventually
         # resolve compatible unit conversions.

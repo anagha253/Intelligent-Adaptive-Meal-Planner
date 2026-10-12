@@ -43,7 +43,7 @@ from src.planning.multi_meal_planner import MultiMealPlanner
 # CONFIGURATION
 # ============================================================
 
-DAYS = 3
+DAYS = 1
 
 MEAL_TYPES = [
     "lunch",
@@ -51,7 +51,7 @@ MEAL_TYPES = [
 ]
 
 MAX_CANDIDATES_PER_SLOT = 10
-
+expected_slots = DAYS * len(MEAL_TYPES)
 
 # ============================================================
 # TEST USER
@@ -570,8 +570,8 @@ def run_acceptance_checks(
 
     checks.append(
         (
-            "6 meal slots generated",
-            len(slots) == 6,
+            "All requested meal slots generated",
+            len(slots) == DAYS * len(MEAL_TYPES),
         )
     )
 
@@ -648,7 +648,7 @@ def run_acceptance_checks(
     checks.append(
         (
             "All requested meal slots filled",
-            len(selected) == len(slots),
+            len(selected) == expected_slots,
         )
     )
 

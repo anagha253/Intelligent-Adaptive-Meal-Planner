@@ -192,4 +192,21 @@ def test_to_taste_requirement_is_preserved_separately():
     assert instruction["recipe_ids"] == ["R1"]
 
     # Qualitative instructions must not become numeric purchases.
-    assert basket["items"] == []
+    assert len(basket["items"]) == 1
+
+    item = basket["items"][0]
+
+    assert item["ingredient_id"] == "ING3046"
+    assert item["name"] == "table salt"
+    assert item["required_quantity"] is None
+    assert item["required_unit"] == "to taste"
+    assert item["purchase_basis"] == "qualitative_requirement"
+    assert item["status"] == "quantity_unknown"
+    assert item["packages"] is None
+    assert item["purchase_cost"] is None
+    assert item["estimated_purchase_cost"] is None
+    assert item["quantity_coverage_verified"] is False
+
+    # Grocery cost remains incomplete.
+    assert basket["projected_cost_complete"] is False
+    assert "table salt" in basket["unpriced_items"]

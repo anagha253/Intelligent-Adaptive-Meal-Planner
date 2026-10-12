@@ -18,6 +18,8 @@ from src.planning.multi_meal_planner import (
     MultiMealPlanner,
 )
 
+from src.input_parser.natural_language_parser import UserInputParser
+
 # ======================================================
 # FAKES
 # ======================================================
@@ -531,8 +533,7 @@ def test_skip_and_replan_preserves_completed_meal_and_skips_requested_slot():
 
     plan = rebuilt["plan"]
     selected_by_slot = {
-        meal["slot"]["slot_id"]: meal
-        for meal in plan["selected_meals"]
+        meal["slot"]["slot_id"]: meal for meal in plan["selected_meals"]
     }
 
     assert selected_by_slot[completed_id]["recipe_id"] == completed_recipe
@@ -540,11 +541,11 @@ def test_skip_and_replan_preserves_completed_meal_and_skips_requested_slot():
     assert remaining_id in selected_by_slot
     assert {item["slot_id"] for item in plan["skipped_slots"]} == {skipped_id}
     assert any(
-        event["event"] == "plan_rebuilt_after_skip"
-        for event in plan["execution_trace"]
+        event["event"] == "plan_rebuilt_after_skip" for event in plan["execution_trace"]
     )
     assert len(original_state.selected_meals) == 3
     assert not original_state.skipped_slots
+
 
 def test_reconcile_inventory_records_qualitative_requirements():
     planner = MultiMealPlanner(manager=FakeManager())
@@ -598,6 +599,101 @@ def test_reconcile_inventory_records_qualitative_requirements():
         for event in state.execution_trace
     )
     assert not any(
-        event.get("event") == "inventory_reconciled"
-        for event in state.execution_trace
+        event.get("event") == "inventory_reconciled" for event in state.execution_trace
     )
+
+
+def test_beam_search_respects_cooking_frequency():
+    manager = FakeManager()
+
+    planner = MultiMealPlanner(
+        manager=manager,
+        max_candidates_per_slot=7,
+    )
+
+    result = planner.plan_meals(
+        user_state={
+            "budget_remaining": 100,
+            "cook_frequency": 2,
+            "max_recipe_repetitions": 4,
+        },
+        start_date=date(2026, 10, 12),
+        days=2,
+        meal_types=["lunch", "dinner"],
+    )
+
+    plan = result["plan"]
+    cooking = plan["cooking_schedule"]
+
+    assert len(plan["selected_meals"]) == 4
+    assert cooking["valid"] is True
+
+    assert all(count <= 2 for count in cooking["weekly_session_counts"].values())
+
+    assert sum(session["portions_prepared"] for session in cooking["sessions"]) == 4
+
+    assert result["validation"]["status"] == "feasible"
+
+
+def test_beam_search_does_not_exceed_cooking_limit():
+    manager = FakeManager()
+
+    planner = MultiMealPlanner(
+        manager=manager,
+        max_candidates_per_slot=7,
+    )
+
+    result = planner.plan_meals(
+        user_state={
+            "budget_remaining": 100,
+            "cook_frequency": 1,
+            "max_recipe_repetitions": 1,
+        },
+        start_date=date(2026, 10, 12),
+        days=2,
+        meal_types=["lunch", "dinner"],
+    )
+
+    plan = result["plan"]
+    cooking = plan["cooking_schedule"]
+
+    assert cooking["valid"] is True
+
+    assert all(count <= 1 for count in cooking["weekly_session_counts"].values())
+
+    assert len(plan["selected_meals"]) < 4
+    assert result["validation"]["status"] in {
+        "partial",
+        "infeasible",
+    }
+
+
+def test_parser_cooking_frequency_reaches_planner():
+    parser = UserInputParser()
+
+    parsed = parser.parse("I have a budget of 100 dollars. " "I can cook twice a week.")
+
+    assert parsed.valid, parsed.errors
+    assert parsed.data["cook_frequency"] == 2
+
+    planner = MultiMealPlanner(
+        manager=FakeManager(),
+        max_candidates_per_slot=7,
+    )
+
+    result = planner.plan_meals(
+        user_state={
+            **parsed.data,
+            "budget_remaining": 100,
+            "max_recipe_repetitions": 4,
+        },
+        start_date=date(2026, 10, 12),
+        days=2,
+        meal_types=["lunch", "dinner"],
+    )
+
+    cooking = result["plan"]["cooking_schedule"]
+
+    assert cooking["max_sessions_per_week"] == 2
+    assert cooking["valid"] is True
+    assert len(result["plan"]["selected_meals"]) == 4

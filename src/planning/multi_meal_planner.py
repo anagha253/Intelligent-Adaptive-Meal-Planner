@@ -5,59 +5,40 @@ from datetime import date
 from typing import Any
 
 from src.planning.meal_slot import (
-
     MealSlot,
-
     generate_meal_slots,
-
 )
 
 from src.planning.plan_state import (
-
     PlanState,
-
 )
 
 from src.planning.plan_validator import (
-
     validate_plan,
-
 )
 
 from src.agents.grocery_agent import calculate_incremental_basket_cost
 
 from src.state.inventory_state import (
-
     normalize_inventory,
-
     add_purchase,
-
     consume_inventory,
-
 )
 
 from src.state.nutrition_tracker import (
-
     aggregate_nutrition,
-
     calculate_nutrition_deviation,
-
     summarize_nutrition,
-
 )
 
 from src.agents.grocery_agent import (
-
     build_plan_grocery_basket,
-
 )
 
-
-
+from src.planning.cooking_schedule import build_cooking_schedule
 
 
 class MultiMealPlanner:
-
     """
 
     Orchestrates planning across multiple meal slots.
@@ -94,16 +75,10 @@ class MultiMealPlanner:
 
     """
 
-
-
     def __init__(
-
         self,
-
         manager,
-
         max_candidates_per_slot: int = 5,
-
     ):
 
         self.manager = manager
@@ -118,24 +93,14 @@ class MultiMealPlanner:
 
     # ============================================================
 
-
-
     def plan_meals(
-
         self,
-
         user_state: dict,
-
         start_date: date,
-
         days: int,
-
         meal_types: list[str],
-
         schedule: dict | None = None,
-
         nutrition_targets: dict | None = None,
-
     ) -> dict:
 
         # ========================================================
@@ -147,15 +112,10 @@ class MultiMealPlanner:
         print(">>>>>>>>>Getting the meals now!! in plan meals<<<<<<<<<<<,")
 
         slots = generate_meal_slots(
-
             start_date=start_date,
-
             days=days,
-
             meal_types=meal_types,
-
             schedule=schedule,
-
         )
 
         print(f"Slots>>>>>>>>>>>>>>>{slots}<<<<<<<<<<<<")
@@ -179,9 +139,7 @@ class MultiMealPlanner:
         # ========================================================
 
         raw_pantry = (
-
             user_state.get("pantry") or user_state.get("ingredient_availability") or {}
-
         )
 
         initial_inventory = normalize_inventory(raw_pantry)
@@ -195,15 +153,10 @@ class MultiMealPlanner:
         # ========================================================
 
         plan_state = PlanState(
-
             slots=slots,
-
             initial_budget=initial_budget,
-
             initial_inventory=initial_inventory,
-
             current_inventory=dict(initial_inventory),
-
         )
 
         print(f"plan state: >>>>>>>>>>>{plan_state}<<<<<<<<<<<\n")
@@ -215,13 +168,9 @@ class MultiMealPlanner:
         # ========================================================
 
         optimized_state = self._optimize_meal_plan(
-
             user_state=user_state,
-
             initial_state=plan_state,
-
             beam_width=5,
-
         )
 
         plan_state = optimized_state
@@ -229,9 +178,7 @@ class MultiMealPlanner:
         # Mark slots that were not filled.
 
         selected_slot_ids = {
-
             meal["slot"]["slot_id"] for meal in plan_state.selected_meals
-
         }
 
         for slot in slots:
@@ -251,19 +198,13 @@ class MultiMealPlanner:
             slot_data = selected["slot"]
 
             matching_slot = next(
-
                 slot for slot in slots if slot.slot_id == slot_data["slot_id"]
-
             )
 
             self._update_nutrition(
-
                 plan_state=plan_state,
-
                 slot=matching_slot,
-
                 decision=selected["decision"],
-
             )
 
         # ========================================================
@@ -285,19 +226,13 @@ class MultiMealPlanner:
         reconciliation_trace_start = len(plan_state.execution_trace)
 
         inventory_ok = self._reconcile_final_inventory(
-
             plan_state=plan_state,
-
             final_grocery_basket=final_grocery_basket,
-
         )
 
         inventory_reconciliation_incomplete = any(
-
             event.get("event") == "inventory_reconciliation_incomplete"
-
             for event in plan_state.execution_trace[reconciliation_trace_start:]
-
         )
 
         # ========================================================
@@ -315,17 +250,12 @@ class MultiMealPlanner:
         if nutrition_targets:
 
             nutrition_deviation = calculate_nutrition_deviation(
-
                 plan_state.nutrition_state,
-
                 nutrition_targets,
-
             )
 
             print(
-
                 f"nutritional devi.>>>>>{nutrition_deviation} and targets : {nutrition_targets}<<<<<<<\n"
-
             )
 
         # ========================================================
@@ -342,14 +272,10 @@ class MultiMealPlanner:
             final_cost = None
 
         all_items_priced = final_grocery_basket.get(
-
             "all_items_priced",
-
             False,
-
         )
 
-        
         validation = validate_plan(
             plan_state=plan_state,
             all_items_priced=all_items_priced,
@@ -358,7 +284,6 @@ class MultiMealPlanner:
                 "projected_cost_complete", False
             ),
         )
-
 
         if not inventory_ok:
 
@@ -369,9 +294,7 @@ class MultiMealPlanner:
         elif inventory_reconciliation_incomplete:
 
             validation["issues"].append(
-
                 "Qualitative ingredient quantities remain unresolved."
-
             )
 
             if validation["status"] == "feasible":
@@ -379,6 +302,26 @@ class MultiMealPlanner:
                 validation["status"] = "uncertain"
 
         print(f"validation of plan >>>>>{validation}<<<<<<<\n")
+
+        # --------------------------------------------------------
+        # Cooking-frequency scheduling
+        # --------------------------------------------------------
+
+        cooking_frequency = user_state.get("cook_frequency")
+
+        if cooking_frequency is not None:
+            cooking_schedule = build_cooking_schedule(
+                selected_meals=plan_state.selected_meals,
+                max_sessions=int(cooking_frequency),
+            )
+
+            plan_state.cooking_schedule = cooking_schedule
+
+            if not cooking_schedule["valid"]:
+                validation["status"] = "infeasible"
+                validation["issues"].append(
+                    "Cooking frequency exceeded: " f"{cooking_schedule['violations']}"
+                )
 
         plan_state.status = validation["status"]
 
@@ -391,17 +334,11 @@ class MultiMealPlanner:
         # ========================================================
 
         return {
-
             "plan": plan_state.to_dict(),
-
             "validation": validation,
-
             "grocery_basket": final_grocery_basket,
-
             "nutrition_summary": nutrition_summary,
-
             "nutrition_deviation": nutrition_deviation,
-
         }
 
     # ============================================================
@@ -410,24 +347,14 @@ class MultiMealPlanner:
 
     # ============================================================
 
-
-
     def skip_and_replan(
-
         self,
-
         user_state: dict,
-
         plan_state: PlanState,
-
         slot_id: str,
-
         completed_slot_ids: set[str] | None = None,
-
         nutrition_targets: dict | None = None,
-
     ) -> dict:
-
         """Skip one slot and replan unfinished slots without changing the input state."""
 
         from copy import deepcopy
@@ -465,13 +392,9 @@ class MultiMealPlanner:
             raise ValueError(f"Meal slot is already skipped: {slot_id}")
 
         selected_by_slot = {
-
             meal.get("slot", {}).get("slot_id"): meal
-
             for meal in plan_state.selected_meals
-
             if meal.get("slot", {}).get("slot_id")
-
         }
 
         missing = completed_ids - set(selected_by_slot)
@@ -479,9 +402,7 @@ class MultiMealPlanner:
         if missing:
 
             raise ValueError(
-
                 f"Completed slots must have selected meals: {sorted(missing)}"
-
             )
 
         rebuilt = deepcopy(plan_state)
@@ -491,32 +412,20 @@ class MultiMealPlanner:
         skipped_ids = {item["slot_id"] for item in rebuilt.skipped_slots}
 
         completed_meals = [
-
             deepcopy(selected_by_slot[slot.slot_id])
-
             for slot in original_slots
-
             if slot.slot_id in completed_ids
-
         ]
 
         remaining_slots = [
-
-            slot for slot in original_slots
-
-            if slot.slot_id not in completed_ids
-
-            and slot.slot_id not in skipped_ids
-
+            slot
+            for slot in original_slots
+            if slot.slot_id not in completed_ids and slot.slot_id not in skipped_ids
         ]
 
         rebuilt.selected_meals = completed_meals
 
-        rebuilt.used_recipe_ids = {
-
-            meal["recipe_id"] for meal in completed_meals
-
-        }
+        rebuilt.used_recipe_ids = {meal["recipe_id"] for meal in completed_meals}
 
         rebuilt.rejected_candidates = []
 
@@ -543,11 +452,8 @@ class MultiMealPlanner:
         if completed_cost is None:
 
             completed_cost = sum(
-
                 max(float(meal.get("estimated_cost") or 0.0), 0.0)
-
                 for meal in completed_meals
-
             )
 
         rebuilt.estimated_spent = max(float(completed_cost or 0.0), 0.0)
@@ -557,13 +463,9 @@ class MultiMealPlanner:
         rebuilt.slots = remaining_slots
 
         optimized = self._optimize_meal_plan(
-
             user_state=user_state,
-
             initial_state=rebuilt,
-
             beam_width=5,
-
         )
 
         # Restore the original schedule order and full slot list.
@@ -571,29 +473,19 @@ class MultiMealPlanner:
         optimized.slots = original_slots
 
         selected_by_slot = {
-
             meal.get("slot", {}).get("slot_id"): meal
-
             for meal in optimized.selected_meals
-
             if meal.get("slot", {}).get("slot_id")
-
         }
 
         optimized.selected_meals = [
-
             selected_by_slot[slot.slot_id]
-
             for slot in original_slots
-
             if slot.slot_id in selected_by_slot
-
         ]
 
         optimized.used_recipe_ids = {
-
             meal["recipe_id"] for meal in optimized.selected_meals
-
         }
 
         selected_ids = set(selected_by_slot)
@@ -615,13 +507,9 @@ class MultiMealPlanner:
             if meal_slot_id in slots_by_id:
 
                 self._update_nutrition(
-
                     plan_state=optimized,
-
                     slot=slots_by_id[meal_slot_id],
-
                     decision=meal.get("decision") or {},
-
                 )
 
         basket = self._build_final_grocery_basket(optimized)
@@ -633,11 +521,8 @@ class MultiMealPlanner:
         inventory_ok = self._reconcile_final_inventory(optimized, basket)
 
         inventory_reconciliation_incomplete = any(
-
             event.get("event") == "inventory_reconciliation_incomplete"
-
             for event in optimized.execution_trace[reconciliation_trace_start:]
-
         )
 
         nutrition_summary = summarize_nutrition(optimized.nutrition_state)
@@ -647,9 +532,7 @@ class MultiMealPlanner:
         if nutrition_targets:
 
             nutrition_deviation = calculate_nutrition_deviation(
-
                 optimized.nutrition_state, nutrition_targets
-
             )
 
         if basket.get("all_items_priced") is True:
@@ -668,9 +551,7 @@ class MultiMealPlanner:
             plan_state=optimized,
             all_items_priced=basket.get("all_items_priced", False),
             final_grocery_cost=final_cost,
-            projected_cost_complete=basket.get(
-                "projected_cost_complete", False
-            ),
+            projected_cost_complete=basket.get("projected_cost_complete", False),
         )
 
         if not inventory_ok:
@@ -682,61 +563,62 @@ class MultiMealPlanner:
         elif inventory_reconciliation_incomplete:
 
             validation["issues"].append(
-
                 "Qualitative ingredient quantities remain unresolved."
-
             )
 
             if validation["status"] == "feasible":
 
                 validation["status"] = "uncertain"
 
+        # Recalculate cooking sessions after adaptive replanning.
+        cooking_frequency = user_state.get("cook_frequency")
+
+        if cooking_frequency is not None:
+            cooking_schedule = build_cooking_schedule(
+                selected_meals=optimized.selected_meals,
+                max_sessions=int(cooking_frequency),
+            )
+
+            optimized.cooking_schedule = cooking_schedule
+
+            if not cooking_schedule["valid"]:
+                validation["status"] = "infeasible"
+                validation["issues"].append(
+                    "Cooking frequency exceeded: " f"{cooking_schedule['violations']}"
+                )
+        else:
+            optimized.cooking_schedule = {}
+
         optimized.status = validation["status"]
 
-        optimized.execution_trace.append({
-
-            "event": "plan_rebuilt_after_skip",
-
-            "skipped_slot_id": slot_id,
-
-            "completed_slot_ids": sorted(completed_ids),
-
-        })
+        optimized.execution_trace.append(
+            {
+                "event": "plan_rebuilt_after_skip",
+                "skipped_slot_id": slot_id,
+                "completed_slot_ids": sorted(completed_ids),
+            }
+        )
 
         self.last_plan_state = optimized
 
         return {
-
             "plan": optimized.to_dict(),
-
             "validation": validation,
-
             "grocery_basket": basket,
-
             "nutrition_summary": nutrition_summary,
-
             "nutrition_deviation": nutrition_deviation,
-
         }
 
     # PLAN ONE MEAL SLOT
 
     # ============================================================
 
-
-
     def _evaluate_candidates_for_slot(
-
         self,
-
         user_state: dict,
-
         slot: MealSlot,
-
         plan_state: PlanState,
-
     ) -> list[dict]:
-
         """
 
         Evaluate recipe candidates for one meal slot.
@@ -752,35 +634,24 @@ class MultiMealPlanner:
         """
 
         candidate_ids = self._get_candidates(
-
             user_state=user_state,
-
             slot=slot,
-
             plan_state=plan_state,
-
         )
 
         feasible_candidates = []
 
         max_repeats = int(
-
             user_state.get(
-
                 "max_recipe_repetitions",
-
                 2,
-
             )
-
         )
 
         for recipe_id in candidate_ids:
 
             recipe_count = sum(
-
                 meal["recipe_id"] == recipe_id for meal in plan_state.selected_meals
-
             )
 
             if recipe_count >= max_repeats:
@@ -788,15 +659,10 @@ class MultiMealPlanner:
                 continue
 
             decision = self._evaluate_candidate(
-
                 user_state=user_state,
-
                 slot=slot,
-
                 recipe_id=recipe_id,
-
                 plan_state=plan_state,
-
             )
 
             reasoning = decision.get("reasoning") or {}
@@ -804,25 +670,17 @@ class MultiMealPlanner:
             constraints = reasoning.get("hard_constraints") or []
 
             non_budget = [
-
                 item for item in constraints if item.get("constraint") != "budget"
-
             ]
 
             if not non_budget or any(
-
                 item.get("status") != "pass" for item in non_budget
-
             ):
 
                 plan_state.add_rejection(
-
                     slot=slot,
-
                     recipe_id=recipe_id,
-
                     reason=non_budget or "Hard constraints not verified",
-
                 )
 
                 continue
@@ -832,13 +690,9 @@ class MultiMealPlanner:
             if not grocery.get("projected_cost_complete"):
 
                 plan_state.add_uncertain(
-
                     slot=slot,
-
                     recipe_id=recipe_id,
-
                     reason="Incomplete grocery projection",
-
                 )
 
                 continue
@@ -848,19 +702,12 @@ class MultiMealPlanner:
             trial_state = deepcopy(plan_state)
 
             trial_state.selected_meals.append(
-
                 {
-
                     "slot": slot.to_dict(),
-
                     "recipe_id": recipe_id,
-
                     "decision": decision,
-
                     "estimated_cost": 0.0,
-
                 }
-
             )
 
             try:
@@ -870,19 +717,12 @@ class MultiMealPlanner:
             except ValueError as exc:
 
                 plan_state.add_uncertain(
-
                     slot=slot,
-
                     recipe_id=recipe_id,
-
                     reason={
-
                         "type": "grocery_aggregation_error",
-
                         "message": str(exc),
-
                     },
-
                 )
 
                 continue
@@ -890,13 +730,10 @@ class MultiMealPlanner:
             projected_total = trial_basket.get("projected_cost")
 
             projected_complete = trial_basket.get(
-
                 "projected_cost_complete",
-
                 False,
-
             )
-            
+
             if not projected_complete or projected_total is None:
 
                 missing = trial_basket.get(
@@ -916,9 +753,7 @@ class MultiMealPlanner:
                         "recipe_id": recipe_id,
                         "projection_missing": missing,
                         "unpriced_items": unpriced,
-                        "known_cost": trial_basket.get(
-                            "known_cost"
-                        ),
+                        "known_cost": trial_basket.get("known_cost"),
                         "projected_cost": projected_total,
                     },
                 )
@@ -940,23 +775,14 @@ class MultiMealPlanner:
             if projected_total > plan_state.initial_budget:
 
                 plan_state.add_rejection(
-
                     slot=slot,
-
                     recipe_id=recipe_id,
-
                     reason={
-
                         "constraint": "budget",
-
                         "status": "fail",
-
                         "projected_plan_cost": projected_total,
-
                         "budget": plan_state.initial_budget,
-
                     },
-
                 )
 
                 continue
@@ -970,21 +796,14 @@ class MultiMealPlanner:
             if plan_state.selected_meals:
 
                 if (
-
                     current_basket.get("projected_cost_complete") is not True
-
                     or current_basket.get("projected_cost") is None
-
                 ):
 
                     plan_state.add_uncertain(
-
                         slot=slot,
-
                         recipe_id=recipe_id,
-
                         reason="Existing combined basket cost incomplete",
-
                     )
 
                     continue
@@ -996,29 +815,19 @@ class MultiMealPlanner:
                 previous_total = 0.0
 
             incremental_cost = round(
-
                 projected_total - previous_total,
-
                 2,
-
             )
 
             if incremental_cost < -0.01:
 
                 plan_state.add_uncertain(
-
                     slot=slot,
-
                     recipe_id=recipe_id,
-
                     reason=(
-
                         "Combined basket cost decreased after "
-
                         "adding a recipe. Check product consistency."
-
                     ),
-
                 )
 
                 continue
@@ -1026,51 +835,31 @@ class MultiMealPlanner:
             incremental_cost = max(0.0, incremental_cost)
 
             feasible_candidates.append(
-
                 {
-
                     "recipe_id": recipe_id,
-
                     "decision": decision,
-
                     "incremental_cost": incremental_cost,
-
                     "total_cost": projected_total,
-
                 }
-
             )
 
         feasible_candidates.sort(
-
             key=lambda item: (
-
                 item["total_cost"],
-
                 item["recipe_id"],
-
             )
-
         )
 
         return feasible_candidates
 
     # Optimise meal plan
 
-
-
     def _optimize_meal_plan(
-
         self,
-
         user_state: dict,
-
         initial_state: PlanState,
-
         beam_width: int = 5,
-
     ) -> PlanState:
-
         """
 
         Find an affordable meal plan while preferring recipe diversity.
@@ -1095,103 +884,90 @@ class MultiMealPlanner:
 
         from copy import deepcopy
 
-
-
         total_possible_meals = len(initial_state.slots)
 
         configured_limit = user_state.get("max_recipe_repetitions")
 
         strict_limit = (
-
-            max(1, int(configured_limit))
-
-            if configured_limit is not None
-
-            else 2
-
+            max(1, int(configured_limit)) if configured_limit is not None else 2
         )
 
+        cooking_frequency = user_state.get("cook_frequency")
 
+        if cooking_frequency is not None:
+            cooking_frequency = int(cooking_frequency)
+            if cooking_frequency < 1:
+                raise ValueError("cook_frequency must be at least 1")
 
-        def ranking_key(state):
+        def cooking_schedule_for(state):
+            if cooking_frequency is None:
+                return None
 
-            return (
-
-                -len(state.selected_meals),
-
-                -len(state.used_recipe_ids),
-
-                round(state.estimated_spent, 2),
-
+            return build_cooking_schedule(
+                selected_meals=state.selected_meals,
+                max_sessions=cooking_frequency,
             )
 
+        def ranking_key(state):
+            schedule = cooking_schedule_for(state)
 
+            return (
+                0 if schedule is None or schedule["valid"] else 1,
+                -len(state.selected_meals),
+                -len(state.used_recipe_ids),
+                round(state.estimated_spent, 2),
+            )
 
         def search(search_user_state):
 
             beams = [deepcopy(initial_state)]
 
-
-
             for slot in initial_state.slots:
 
                 next_beams = []
 
-
-
                 for state in beams:
 
                     candidates = self._evaluate_candidates_for_slot(
-
                         user_state=search_user_state,
-
                         slot=slot,
-
                         plan_state=state,
-
                     )
-
-
 
                     # Keep a skip-slot branch for partial plans.
 
                     next_beams.append(deepcopy(state))
-
-
 
                     for candidate in candidates:
 
                         trial = deepcopy(state)
 
                         trial.add_selected_meal(
-
                             slot=slot,
-
                             recipe_id=candidate["recipe_id"],
-
                             decision=candidate["decision"],
-
                             estimated_cost=candidate["incremental_cost"],
-
                         )
 
                         # The consolidated basket total is authoritative.
 
                         trial.estimated_spent = candidate["total_cost"]
 
+                        cooking_schedule = cooking_schedule_for(trial)
+
+                        if (
+                            cooking_schedule is not None
+                            and not cooking_schedule["valid"]
+                        ):
+                            continue
+
                         next_beams.append(trial)
-
-
 
                 next_beams.sort(key=ranking_key)
 
                 beams = next_beams[:beam_width]
 
-
-
             return min(beams, key=ranking_key)
-
-
 
         strict_user_state = dict(user_state)
 
@@ -1199,45 +975,28 @@ class MultiMealPlanner:
 
         best_state = search(strict_user_state)
 
-
-
         # Relax only the default limit, and only when doing so fills
 
         # more meal slots. Never override an explicit user limit.
 
         if (
-
             configured_limit is None
-
             and len(best_state.selected_meals) < total_possible_meals
-
         ):
 
             relaxed_user_state = dict(user_state)
 
             relaxed_user_state["max_recipe_repetitions"] = max(
-
                 strict_limit, total_possible_meals
-
             )
 
             relaxed_state = search(relaxed_user_state)
 
-
-
-            if len(relaxed_state.selected_meals) > len(
-
-                best_state.selected_meals
-
-            ):
+            if len(relaxed_state.selected_meals) > len(best_state.selected_meals):
 
                 best_state = relaxed_state
 
-
-
         return best_state
-
-
 
     # ============================================================
 
@@ -1245,20 +1004,12 @@ class MultiMealPlanner:
 
     # ============================================================
 
-
-
     def _get_candidates(
-
         self,
-
         user_state: dict,
-
         slot: MealSlot,
-
         plan_state: PlanState,
-
     ) -> list[str]:
-
         """
 
         Retrieve new recipes and include previously selected
@@ -1270,25 +1021,16 @@ class MultiMealPlanner:
         """
 
         meal_slot = {
-
             "date": slot.date.isoformat(),
-
             "meal_type": slot.meal_type,
-
             "max_cooking_time": slot.max_cooking_time,
-
         }
 
         max_repeats = int(
-
             user_state.get(
-
                 "max_recipe_repetitions",
-
                 2,
-
             )
-
         )
 
         usage_counts = {}
@@ -1302,13 +1044,9 @@ class MultiMealPlanner:
         # Reuse candidates are already known to the planner.
 
         reuse_ids = [
-
             recipe_id
-
             for recipe_id in usage_counts
-
             if usage_counts[recipe_id] < max_repeats
-
         ]
 
         # Ask Recipe Agent for new recipes.
@@ -1318,17 +1056,11 @@ class MultiMealPlanner:
         # but are reintroduced locally as reuse candidates.
 
         response = self.manager.recipe_agent.run(
-
             user_state=user_state,
-
             meal_slot=meal_slot,
-
             selected_recipe_ids=list(plan_state.used_recipe_ids),
-
             recent_cuisines=[],
-
             max_candidates=self.max_candidates_per_slot,
-
         )
 
         if isinstance(response, dict):
@@ -1395,20 +1127,12 @@ class MultiMealPlanner:
 
     # ============================================================
 
-
-
     def _evaluate_candidate(
-
         self,
-
         user_state: dict,
-
         slot: MealSlot,
-
         recipe_id: str,
-
         plan_state: PlanState,
-
     ) -> dict:
 
         planning_user_state = dict(user_state)
@@ -1420,31 +1144,20 @@ class MultiMealPlanner:
         # Use CURRENT inventory.
 
         planning_user_state["pantry"] = self._inventory_to_pantry(
-
             plan_state.current_inventory
-
         )
 
         meal_context = {
-
             "date": slot.date.isoformat(),
-
             "meal_type": slot.meal_type,
-
             "max_cooking_time": slot.max_cooking_time,
-
         }
 
         return self.manager.evaluate_candidate(
-
             recipe_id=recipe_id,
-
             user_state=planning_user_state,
-
             meal_context=meal_context,
-
             defer_budget_to_planner=True,
-
         )
 
     # ============================================================
@@ -1454,15 +1167,9 @@ class MultiMealPlanner:
     # ============================================================
 
     @staticmethod
-
-
-
     def _get_budget(
-
         user_state: dict,
-
     ) -> float:
-
         """
 
         Support either:
@@ -1490,31 +1197,20 @@ class MultiMealPlanner:
             return float(user_state["budget_remaining"])
 
         budget = user_state.get(
-
             "budget",
-
             0.0,
-
         )
 
         if isinstance(budget, dict):
 
             return float(
-
                 budget.get(
-
                     "remaining",
-
                     budget.get(
-
                         "total",
-
                         0.0,
-
                     ),
-
                 )
-
             )
 
         return float(budget or 0.0)
@@ -1526,15 +1222,9 @@ class MultiMealPlanner:
     # ============================================================
 
     @staticmethod
-
-
-
     def _extract_reason(
-
         decision: dict,
-
     ) -> Any:
-
         """
 
         Preserve useful explanation from
@@ -1544,39 +1234,23 @@ class MultiMealPlanner:
         """
 
         return (
-
             decision.get("reason")
-
             or decision.get("failed_constraints")
-
             or decision.get("unknown_constraints")
-
             or decision.get("errors")
-
             or "unspecified"
-
         )
 
-
-
     def _update_nutrition(
-
         self,
-
         plan_state: PlanState,
-
         slot: MealSlot,
-
         decision: dict,
-
     ) -> None:
 
         recipe = decision.get(
-
             "recipe",
-
             {},
-
         )
 
         if not recipe:
@@ -1584,43 +1258,25 @@ class MultiMealPlanner:
             return
 
         plan_state.nutrition_state = aggregate_nutrition(
-
             nutrition_state=plan_state.nutrition_state,
-
             date=slot.date.isoformat(),
-
             nutrition=recipe,
-
             servings=1.0,
-
         )
 
         plan_state.execution_trace.append(
-
             {
-
                 "event": "nutrition_updated",
-
                 "slot_id": slot.slot_id,
-
                 "recipe_id": decision.get("recipe_id"),
-
             }
-
         )
 
-
-
     def _reconcile_final_inventory(
-
         self,
-
         plan_state: PlanState,
-
         final_grocery_basket: dict,
-
     ) -> bool:
-
         """
 
         Reconcile inventory once after plan optimization.
@@ -1642,23 +1298,24 @@ class MultiMealPlanner:
         inventory = deepcopy(plan_state.initial_inventory)
 
         # 1. Add purchases from the final basket only.
+        # 1. Add purchases from the final basket only.
 
         for item in final_grocery_basket.get("items", []):
+
+            # Unknown quantity ingredients remain in the grocery list,
+            # but cannot be numerically added to inventory.
+            if item.get("purchase_basis") == "qualitative_requirement":
+                continue
 
             packages = item.get("packages")
 
             if packages is None:
 
                 plan_state.execution_trace.append(
-
                     {
-
                         "event": "inventory_reconciliation_failed",
-
                         "reason": ("Unknown package count for " f"{item.get('name')}"),
-
                     }
-
                 )
 
                 return False
@@ -1670,59 +1327,38 @@ class MultiMealPlanner:
             if item.get("package_quantity") is None or not item.get("package_unit"):
 
                 plan_state.execution_trace.append(
-
                     {
-
                         "event": "inventory_reconciliation_failed",
-
                         "reason": (
-
                             "Missing package quantity or unit for "
-
                             f"{item.get('name')}"
-
                         ),
-
                     }
-
                 )
 
                 return False
 
             purchase = {
-
                 "ingredient_name": item.get("name"),
-
                 "package_quantity": item["package_quantity"],
-
                 "package_unit": item["package_unit"],
-
                 "packages_needed": packages,
-
             }
 
             try:
 
                 inventory = add_purchase(
-
                     inventory,
-
                     purchase,
-
                 )
 
             except ValueError as exc:
 
                 plan_state.execution_trace.append(
-
                     {
-
                         "event": "inventory_reconciliation_failed",
-
                         "reason": str(exc),
-
                     }
-
                 )
 
                 return False
@@ -1732,18 +1368,11 @@ class MultiMealPlanner:
         qualitative_requirements = []
 
         qualitative_instructions = {
-
             "to taste",
-
             "as needed",
-
             "as required",
-
             "required",
-
         }
-
-
 
         reconciliation_errors = []
 
@@ -1757,8 +1386,6 @@ class MultiMealPlanner:
 
             measurable = []
 
-
-
             for ingredient in required:
 
                 if not isinstance(ingredient, dict):
@@ -1767,73 +1394,48 @@ class MultiMealPlanner:
 
                     continue
 
-
-
                 quantity = ingredient.get(
-
                     "quantity",
-
                     ingredient.get("required_quantity"),
-
                 )
 
-                unit = str(
-
-                    ingredient.get(
-
-                        "unit",
-
-                        ingredient.get("required_unit", ""),
-
+                unit = (
+                    str(
+                        ingredient.get(
+                            "unit",
+                            ingredient.get("required_unit", ""),
+                        )
+                        or ""
                     )
-
-                    or ""
-
-                ).strip().lower()
+                    .strip()
+                    .lower()
+                )
 
                 qualitative_quantity = (
-
                     isinstance(quantity, str)
-
                     and quantity.strip().lower() in qualitative_instructions
-
                 )
 
                 qualitative_unit = unit in qualitative_instructions
 
-
-
                 if qualitative_quantity or qualitative_unit:
 
                     qualitative_requirements.append(
-
                         {
-
                             "event": "qualitative_requirement_unresolved",
-
                             "recipe_id": selected.get("recipe_id"),
-
                             "ingredient_name": (
-
                                 ingredient.get("ingredient_name")
-
                                 or ingredient.get("name")
-
                             ),
-
                             "quantity": quantity,
-
                             "unit": unit,
-
                         }
-
                     )
 
                 else:
 
                     measurable.append(ingredient)
-
-
 
             # Check every measurable requirement instead of stopping at the
 
@@ -1850,11 +1452,9 @@ class MultiMealPlanner:
                     reason = str(exc)
 
                     ingredient_name = (
-
                         ingredient.get("ingredient_name") or ingredient.get("name")
-
-                        if isinstance(ingredient, dict) else None
-
+                        if isinstance(ingredient, dict)
+                        else None
                     )
 
                     if reason.startswith("Package contents unknown"):
@@ -1873,19 +1473,14 @@ class MultiMealPlanner:
 
                         error_type = "inventory_error"
 
-                    reconciliation_errors.append({
-
-                        "recipe_id": selected.get("recipe_id"),
-
-                        "ingredient_name": ingredient_name,
-
-                        "error_type": error_type,
-
-                        "reason": reason,
-
-                    })
-
-
+                    reconciliation_errors.append(
+                        {
+                            "recipe_id": selected.get("recipe_id"),
+                            "ingredient_name": ingredient_name,
+                            "error_type": error_type,
+                            "reason": reason,
+                        }
+                    )
 
         if reconciliation_errors:
 
@@ -1893,29 +1488,21 @@ class MultiMealPlanner:
 
             # Report all issues in a single event for easier diagnosis.
 
-            plan_state.execution_trace.append({
-
-                "event": "inventory_reconciliation_failed",
-
-                "reason": "One or more ingredient requirements could not be reconciled.",
-
-                "unresolved_count": sum(
-
-                    error["error_type"] in {"unresolved_conversion", "package_contents_unknown"}
-
-                    for error in reconciliation_errors
-
-                ),
-
-                "error_count": len(reconciliation_errors),
-
-                "details": reconciliation_errors,
-
-            })
+            plan_state.execution_trace.append(
+                {
+                    "event": "inventory_reconciliation_failed",
+                    "reason": "One or more ingredient requirements could not be reconciled.",
+                    "unresolved_count": sum(
+                        error["error_type"]
+                        in {"unresolved_conversion", "package_contents_unknown"}
+                        for error in reconciliation_errors
+                    ),
+                    "error_count": len(reconciliation_errors),
+                    "details": reconciliation_errors,
+                }
+            )
 
             return False
-
-
 
         plan_state.execution_trace.extend(qualitative_requirements)
 
@@ -1928,81 +1515,50 @@ class MultiMealPlanner:
         if qualitative_requirements:
 
             plan_state.execution_trace.append(
-
                 {
-
                     "event": "inventory_reconciliation_incomplete",
-
                     "reason": "Qualitative ingredient quantities remain unresolved.",
-
                     "unresolved_count": len(qualitative_requirements),
-
                 }
-
             )
 
             return True
 
-
-
         # 3. Commit only when all requirements are measurable and succeed.
 
         plan_state.execution_trace.append(
-
             {
-
                 "event": "inventory_reconciled",
-
                 "selected_meals": len(plan_state.selected_meals),
-
             }
-
         )
 
         return True
 
-
-
     def _update_inventory(
-
         self,
-
         plan_state: PlanState,
-
         decision: dict,
-
     ) -> None:
 
         ingredient_data = decision.get(
-
             "ingredient",
-
             {},
-
         )
 
         grocery_data = decision.get(
-
             "grocery",
-
             {},
-
         )
 
         required_ingredients = ingredient_data.get(
-
             "required_ingredients",
-
             [],
-
         )
 
         grocery_items = grocery_data.get(
-
             "items",
-
             [],
-
         )
 
         inventory = plan_state.current_inventory
@@ -2028,59 +1584,38 @@ class MultiMealPlanner:
                 packages_needed = item.get("packages")
 
             if (
-
                 package_quantity is None
-
                 or package_unit is None
-
                 or packages_needed is None
-
             ):
 
                 continue
 
             purchase = {
-
                 "ingredient_name": (
-
                     item.get("ingredient")
-
                     or item.get("ingredient_name")
-
                     or item.get("name")
-
                 ),
-
                 "package_quantity": package_quantity,
-
                 "package_unit": package_unit,
-
                 "packages_needed": packages_needed,
-
             }
 
             try:
 
                 inventory = add_purchase(
-
                     inventory,
-
                     purchase,
-
                 )
 
             except ValueError as exc:
 
                 plan_state.execution_trace.append(
-
                     {
-
                         "event": "inventory_purchase_warning",
-
                         "reason": str(exc),
-
                     }
-
                 )
 
         # ========================================================
@@ -2092,11 +1627,8 @@ class MultiMealPlanner:
         try:
 
             inventory = consume_inventory(
-
                 inventory,
-
                 required_ingredients,
-
             )
 
         except ValueError as exc:
@@ -2108,29 +1640,18 @@ class MultiMealPlanner:
             # Keep trace so this can be investigated.
 
             plan_state.execution_trace.append(
-
                 {
-
                     "event": "inventory_consumption_warning",
-
                     "recipe_id": decision.get("recipe_id"),
-
                     "reason": str(exc),
-
                 }
-
             )
 
         plan_state.current_inventory = inventory
 
     @staticmethod
-
-
-
     def _inventory_to_pantry(
-
         inventory: dict,
-
     ) -> list[dict]:
 
         pantry = []
@@ -2138,29 +1659,18 @@ class MultiMealPlanner:
         for name, item in (inventory or {}).items():
 
             pantry.append(
-
                 {
-
                     "ingredient_name": name,
-
                     "quantity": item.get("quantity"),
-
                     "unit": item.get("unit"),
-
                 }
-
             )
 
         return pantry
 
-
-
     def _build_final_grocery_basket(
-
         self,
-
         plan_state: PlanState,
-
     ) -> dict:
 
         recipe_requirements = []
@@ -2178,11 +1688,8 @@ class MultiMealPlanner:
             recipe_id = selected.get("recipe_id")
 
             decision = selected.get(
-
                 "decision",
-
                 {},
-
             )
 
             # ----------------------------------------------------
@@ -2192,31 +1699,20 @@ class MultiMealPlanner:
             # ----------------------------------------------------
 
             ingredient_data = decision.get(
-
                 "ingredient",
-
                 {},
-
             )
 
             required = ingredient_data.get(
-
                 "required_ingredients",
-
                 [],
-
             )
 
             recipe_requirements.append(
-
                 {
-
                     "recipe_id": recipe_id,
-
                     "ingredients": required,
-
                 }
-
             )
 
             # ----------------------------------------------------
@@ -2232,29 +1728,19 @@ class MultiMealPlanner:
             # ----------------------------------------------------
 
             grocery_data = decision.get(
-
                 "grocery",
-
                 {},
-
             )
 
             for item in grocery_data.get(
-
                 "items",
-
                 [],
-
             ):
 
                 ingredient_name = (
-
                     item.get("ingredient")
-
                     or item.get("ingredient_name")
-
                     or item.get("name")
-
                 )
 
                 if not ingredient_name:
@@ -2272,23 +1758,14 @@ class MultiMealPlanner:
                     price = item.get("price_per_package")
 
                 product_catalog.append(
-
                     {
-
                         **item,
-
                         "ingredient_id": item.get("ingredient_id"),
-
                         "ingredient_name": ingredient_name,
-
                         "package_quantity": item.get("package_quantity"),
-
                         "package_unit": item.get("package_unit"),
-
                         "price": price,
-
                     }
-
                 )
 
         # ========================================================
@@ -2318,55 +1795,33 @@ class MultiMealPlanner:
         # ingredient data, preserve the old fallback behaviour.
 
         if not recipe_requirements or not any(
-
             item["ingredients"] for item in recipe_requirements
-
         ):
 
             has_selected_meals = len(plan_state.selected_meals) > 0
 
             return {
-
                 "items": [],
-
                 "known_cost": round(
-
                     plan_state.estimated_spent,
-
                     2,
-
                 ),
-
                 # An empty plan has nothing to price, so it must
-
                 # not be reported as a successfully priced plan.
-
                 "all_items_priced": has_selected_meals,
-
                 "unpriced_items": [],
-
                 "aggregated_requirements": [],
-
                 "status": ("complete" if has_selected_meals else "empty_plan"),
-
             }
 
         return build_plan_grocery_basket(
-
             recipe_requirements=recipe_requirements,
-
             inventory=initial_inventory_list,
-
             product_catalog=product_catalog,
-
         )
 
     @staticmethod
-
-
-
     def _extract_cost(decision: dict) -> float:
-
         """
 
         Extract the total cost of ONE candidate recipe.
@@ -2428,31 +1883,20 @@ class MultiMealPlanner:
         raise ValueError("Candidate grocery cost is incomplete")
 
     @staticmethod
-
-
-
     def _extract_reason(
-
         decision: dict,
-
     ) -> Any:
 
         if decision.get("status") == "failed":
 
             return {
-
                 "stage": decision.get("stage"),
-
                 "reason": decision.get("reason"),
-
             }
 
         reasoning = decision.get(
-
             "reasoning",
-
             {},
-
         )
 
         status = reasoning.get("status")
@@ -2460,23 +1904,15 @@ class MultiMealPlanner:
         if status == "rejected":
 
             return reasoning.get(
-
                 "failed_constraints",
-
                 [],
-
             )
 
         if status == "uncertain":
 
             return reasoning.get(
-
                 "unknown_constraints",
-
                 [],
-
             )
 
         return "unspecified"
-
-

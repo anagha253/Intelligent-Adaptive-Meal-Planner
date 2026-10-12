@@ -43,6 +43,7 @@ from __future__ import annotations
 
 
 import copy
+import logging
 
 
 
@@ -57,6 +58,8 @@ from src.grocery.units import to_base
 
 
 from src.grocery.ingredient_conversions import estimate_ingredient_mass
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -717,6 +720,12 @@ def _subtract(
 
 
     if available_mass is None or required_mass is None:
+        logger.warning(
+            "[INVENTORY CONVERSION UNRESOLVED] ingredient=%r available=%s %s "
+            "required=%s %s available_mass=%r required_mass=%r",
+            ingredient_name, available_quantity, available_unit,
+            required_quantity, required_unit, available_mass, required_mass,
+        )
         if available_mass is None and available_unit in {"pack", "packs", "package", "packages"}:
             raise ValueError(
                 f"Package contents unknown for ingredient '{ingredient_name}': "
@@ -761,6 +770,12 @@ def _subtract(
 
 
 
+    logger.info(
+        "[INVENTORY CONVERSION] ingredient=%r available_g=%s required_g=%s "
+        "available_source=%s required_source=%s",
+        ingredient_name, available_mass[0], required_mass[0],
+        available_mass[1], required_mass[1],
+    )
     remaining_grams = max(0.0, available_mass[0] - required_mass[0])
 
 

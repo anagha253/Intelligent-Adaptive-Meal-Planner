@@ -17,14 +17,24 @@ def validate_plan(
     represented as verified retailer prices.
     """
 
-    total_slots = len(plan_state.slots)
-    selected_slots = len(plan_state.selected_meals)
+    skipped_ids = {item["slot_id"] for item in plan_state.skipped_slots}
+
+    active_slots = [
+        slot for slot in plan_state.slots if slot.slot_id not in skipped_ids
+    ]
+
+    total_slots = len(active_slots)
+
+    selected_slots = sum(
+        1
+        for meal in plan_state.selected_meals
+        if meal["slot"]["slot_id"] not in skipped_ids
+    )
+
     issues = []
 
     if selected_slots < total_slots:
-        issues.append(
-            f"Only {selected_slots}/{total_slots} meal slots were filled."
-        )
+        issues.append(f"Only {selected_slots}/{total_slots} meal slots were filled.")
 
     valid_cost = (
         final_grocery_cost is not None

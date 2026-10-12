@@ -148,7 +148,7 @@ def estimate_ingredient_mass(
         if canonical:
             conversion = INGREDIENT_CONVERSIONS.get(canonical)
     if conversion is None:
-        return None
+        return _reference_mass(name, quantity, measure)
 
     mapping = {
         "tablespoon": (conversion.grams_per_tablespoon, 1),
@@ -186,7 +186,7 @@ def estimate_ingredient_mass(
     }
     factor, multiplier = mapping.get(measure, (None, 1))
     if factor is None:
-        return None
+        return _reference_mass(name, quantity, measure)
     return round(quantity * factor * multiplier, 4), "g"
 
 
@@ -222,3 +222,37 @@ def _mapping_aliases() -> dict[str, str]:
     except (OSError, csv.Error):
         return {}
     return {key: value for key, value in aliases.items() if key not in ambiguous}
+
+
+@lru_cache(maxsize=1)
+def _mass_reference() -> dict[tuple[str, str], float]:
+    """Load reviewed grams-per-unit facts; reject ambiguous/invalid rows."""
+    path = Path(__file__).resolve().parents[2] / "data" / "processed" / "ingredient_mass_reference.csv"
+    result = {}
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            for row in csv.DictReader(stream):
+                if (row.get("status") or "").strip().lower() != "approved":
+                    continue
+                name = " ".join((row.get("ingredient_name") or "").lower().split())
+                unit = (row.get("unit") or "").strip().lower()
+                try:
+                    factor = float(row.get("grams_per_unit") or "")
+                except ValueError:
+                    continue
+                if not name or not unit or not math.isfinite(factor) or not 0 < factor <= 100000:
+                    continue
+                # Never silently use a generic 'count' as a mass.
+                if unit in {"count", "unit", "each"}:
+                    continue
+                result[(name, unit)] = factor
+    except (OSError, csv.Error):
+        pass
+    return result
+
+
+def _reference_mass(name: str, quantity: float, unit: str) -> tuple[float, str] | None:
+    factor = _mass_reference().get((name, unit))
+    if factor is None:
+        return None
+    return round(quantity * factor, 4), "g"

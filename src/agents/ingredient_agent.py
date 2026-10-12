@@ -478,12 +478,8 @@ class IngredientAgent:
 
             status = item.get("status")
 
-            if status in {
-                "unit_mismatch",
-                "quantity_unknown",
-            }:
-
-                unsupported_items.append(item)
+            if status == "unit_mismatch":
+               unsupported_items.append(item)
 
         # ----------------------------------------------------
         # Status
