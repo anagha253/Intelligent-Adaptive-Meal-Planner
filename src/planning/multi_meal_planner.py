@@ -334,16 +334,11 @@ class MultiMealPlanner:
 
         # ========================================================
 
-        if final_grocery_basket.get("all_items_priced") is True:
-
-            final_cost = final_grocery_basket.get("known_cost")
-
+        if final_grocery_basket.get("planning_cost_complete") is True:
+            final_cost = final_grocery_basket.get("planning_cost")
         elif final_grocery_basket.get("projected_cost_complete") is True:
-
             final_cost = final_grocery_basket.get("projected_cost")
-
         else:
-
             final_cost = None
 
         all_items_priced = final_grocery_basket.get(
@@ -354,15 +349,16 @@ class MultiMealPlanner:
 
         )
 
+        
         validation = validate_plan(
-
             plan_state=plan_state,
-
             all_items_priced=all_items_priced,
-
             final_grocery_cost=final_cost,
-
+            projected_cost_complete=final_grocery_basket.get(
+                "projected_cost_complete", False
+            ),
         )
+
 
         if not inventory_ok:
 
@@ -669,13 +665,12 @@ class MultiMealPlanner:
             final_cost = None
 
         validation = validate_plan(
-
             plan_state=optimized,
-
             all_items_priced=basket.get("all_items_priced", False),
-
             final_grocery_cost=final_cost,
-
+            projected_cost_complete=basket.get(
+                "projected_cost_complete", False
+            ),
         )
 
         if not inventory_ok:
@@ -901,17 +896,41 @@ class MultiMealPlanner:
                 False,
 
             )
-
+            
             if not projected_complete or projected_total is None:
 
+                missing = trial_basket.get(
+                    "projection_missing",
+                    [],
+                )
+
+                unpriced = trial_basket.get(
+                    "unpriced_items",
+                    [],
+                )
+
+                print(
+                    "[INCOMPLETE COMBINED BASKET]",
+                    {
+                        "slot": slot.slot_id,
+                        "recipe_id": recipe_id,
+                        "projection_missing": missing,
+                        "unpriced_items": unpriced,
+                        "known_cost": trial_basket.get(
+                            "known_cost"
+                        ),
+                        "projected_cost": projected_total,
+                    },
+                )
+
                 plan_state.add_uncertain(
-
                     slot=slot,
-
                     recipe_id=recipe_id,
-
-                    reason="Combined basket cost incomplete",
-
+                    reason={
+                        "type": "combined_basket_incomplete",
+                        "projection_missing": missing,
+                        "unpriced_items": unpriced,
+                    },
                 )
 
                 continue
@@ -1612,7 +1631,7 @@ class MultiMealPlanner:
 
         - all selected recipe requirements
 
-        \= final inventory
+        = final inventory
 
         Never commit partial inventory updates.
 

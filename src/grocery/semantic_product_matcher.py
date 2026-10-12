@@ -298,6 +298,7 @@ COMPOUND_IDENTITIES = {
     "lemon grass",
     "lemongrass",
     "century egg",
+    "coconut water",
     "salted egg",
     "salted egg yolk",
     "sugared egg yolk",

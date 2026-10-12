@@ -71,6 +71,10 @@ INGREDIENT_CONVERSIONS = {
         grams_per_tablespoon=9.0,
         grams_per_pinch=0.3,
     ),
+    "cucumber": IngredientConversion(
+        _SOURCE,
+        grams_per_piece=250,
+    ),
     "masa harina": IngredientConversion(
     _SOURCE,
     grams_per_cup=120,

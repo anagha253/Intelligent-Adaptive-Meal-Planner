@@ -192,7 +192,7 @@ def _parse_quantity(value: Any) -> tuple[float | None, str]:
 
 
 
-    """Parse values such as \`\`'200 grams'\`\` or structured quantity/unit data."""
+    """Parse values such as '200 grams' or structured quantity/unit data."""
 
 
 
@@ -877,7 +877,7 @@ def consume_inventory(
 
 
 
-    or incompatible unit raises \`\`ValueError\`\` instead of silently assuming
+    or incompatible unit raises ``ValueError`` instead of silently assuming
 
 
 
@@ -1077,7 +1077,7 @@ def add_purchase(
 
 
 
-    A fallback \`\`quantity\`\` + \`\`unit\`\` pair is also supported for simpler tests.
+    A fallback ``quantity`` + ``unit`` pair is also supported for simpler tests.
 
 
 

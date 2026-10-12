@@ -1394,19 +1394,32 @@ def build_plan_grocery_basket(
             else:
                 purchase_basis = "estimated_quantity"
         else:
-            # Cannot prove exact quantity coverage.
-            # One package is a provisional assumption.
+            # No reliable conversion exists between the
+            # required ingredient unit and retail package unit.
+            #
+            # One package is only a provisional shopping
+            # suggestion, NOT proof of sufficient inventory.
+
             packages = 1
+
+            # Quantity remains expressed in the package unit.
+            # Inventory must not interpret this as recipe units.
             purchased_quantity = package_quantity
+
+            # Leftover cannot be calculated without a
+            # compatible unit conversion.
             leftover_quantity = None
-            purchase_basis = (
-                "minimum_retail_package"
-            )
+
+            purchase_basis = "minimum_retail_package"
+
+            # Explicitly mark coverage as unverified.
             quantity_supported = False
             warnings.append(
-                f"{ingredient_name}: incompatible "
-                f"recipe/package units; assuming "
-                f"one retail package."
+                f"{ingredient_name}: package coverage unresolved "
+                f"(required {required} {required_unit}, "
+                f"package {package_quantity} {package_unit}). "
+                "One package is a provisional minimum purchase; "
+                "inventory sufficiency is not verified."
             )
         estimated_purchase_cost = round(
             packages * price,
@@ -1486,6 +1499,13 @@ def build_plan_grocery_basket(
                     else "unverified"
                 )
             )
+
+        # Accepted cost for meal planning and budgeting.
+        # Includes both Tavily and Ollama prices.
+        base_item["planning_purchase_cost"] = (
+            estimated_purchase_cost
+
+        )
         base_item.update({
             "packages": packages,
             "purchased_quantity": purchased_quantity,
@@ -1580,6 +1600,12 @@ def build_plan_grocery_basket(
                 "all_items_have_usable_cost": (
             all_items_have_usable_cost
         ),
+          "planning_cost": (
+            round(projected_cost, 2)
+            if projection_complete
+            else None
+        ),
+        "planning_cost_complete": projection_complete,
     }
 def calculate_incremental_basket_cost(
     selected_recipe_requirements,
