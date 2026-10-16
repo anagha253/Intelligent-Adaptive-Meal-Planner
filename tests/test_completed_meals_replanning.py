@@ -149,10 +149,30 @@ def test_leftover_slot_buys_no_ingredients(saved):
 
 def test_expired_leftover_is_not_allocated(expired):
     plan = expired["final"]
-    assert all(m.get("meal_source") != "prepared_leftover" for m in plan["selected_meals"])
-    assert plan["prepared_leftovers"][0]["servings_remaining"] == 1
-    [unused] = [e for e in plan["execution_trace"] if e["event"] == "prepared_leftover_not_used"]
-    assert unused["reason"] == "expired_before_remaining_slots"
+
+    # Expired leftovers must never be allocated.
+    assert all(
+        meal.get("meal_source") != "prepared_leftover"
+        for meal in plan["selected_meals"]
+    )
+
+    # The expired leftover must remain unconsumed.
+    assert (
+        plan["prepared_leftovers"][0]["servings_remaining"]
+        == 1
+    )
+
+    # Streamlit excludes expired leftovers before approval.
+    # Therefore, no allocation or unused-approval event is expected.
+    assert not any(
+        event.get("event") in {
+            "prepared_leftover_allocated",
+            "prepared_leftover_not_used",
+        }
+        for event in plan["execution_trace"]
+    )
+
+    # Completed meals must not reappear as current meals.
     assert not EATEN & set(expired["observed"]["current"])
 
 
