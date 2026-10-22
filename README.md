@@ -1,6 +1,6 @@
 # Intelligent Adaptive Meal Planner (IAMP)
 
-GC-1 is a Streamlit-based meal-planning application that creates personalized multi-day meal plans, considers available pantry ingredients, estimates grocery needs, presents nutrition summaries, and adapts future meals when plans change.
+Our model is meal-planning application that creates personalized multi-day meal plans, considers available pantry ingredients, estimates grocery needs, presents nutrition summaries, and adapts future meals when plans change.
 
 ## Features
 
@@ -150,4 +150,4 @@ The last user-reported checks on the working branch were **981 passing tests**, 
 
 ## Project status
 
-GC-1 supports multi-day meal planning, pantry-aware grocery calculations, nutrition summaries, and adaptive replanning. The application is a project implementation; output quality depends on recipe data, product coverage, configuration, and the constraints provided. Always review quantities, food storage dates, and nutrition estimates before relying on them.
+Our supports multi-day meal planning, pantry-aware grocery calculations, nutrition summaries, and adaptive replanning. The application is a project implementation; output quality depends on recipe data, product coverage, configuration, and the constraints provided. Always review quantities, food storage dates, and nutrition estimates before relying on them.
