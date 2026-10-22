@@ -20,7 +20,7 @@ data/raw/
 data/dummy
 data/pantry
 data/users
-data/processed
+data/processed/recipe_rejection_reports
 data/cache/grocery_cache.db
 data/ui_state
 # Generated user pantry state
